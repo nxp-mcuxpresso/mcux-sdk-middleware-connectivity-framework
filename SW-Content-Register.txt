@@ -1,0 +1,21 @@
+Release Name: MCUXpresso Software Development Kit (SDK) Framework Middleware
+Release Version: 2.6.7
+Package License: LA_OPT_NXP_Software_License.htm - Additional Distribution License, Section 2.3 applies  
+
+FWK                        version: 5.7.5                               
+                           Location: /           
+                           Description: Connectivity Framework middleware for
+                           Connectivity stacks                               
+                           License: Open Source - BSD-3-Clause               
+                           Author: NXP                                       
+                           name: Connectivity Framework                      
+                           Format: source code and header Files              
+
+SecLib                     version: 5.7.5                                    
+                           Location: SecLib/lib_crypto_*.a                                                 
+                           Description: Connectivity Security Library        
+                           License: Proprietary, See EULA                    
+                           LA_OPT_NXP_Software_License.htm                   
+                           Author: NXP                                       
+                           name: Connectivity SecLib                         
+                           Format: Binary libraries
