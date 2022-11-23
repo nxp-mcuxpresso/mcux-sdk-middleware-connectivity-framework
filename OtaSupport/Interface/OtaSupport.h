@@ -27,10 +27,9 @@ extern "C" {
 *************************************************************************************
 ************************************************************************************/
 
-#define gOtaVersion_c (0x01)
-
 /*!< gOtaErasePolicyOnTheFly_c sector erasure interleaved with programming operations */
 #define gOtaEraseOnTheFly_c 0
+
 /*!< gOtaEraseBeforeImageBlockReq_c erase enough headroom for the BlockImage size requested */
 #define gOtaEraseBeforeImageBlockReq_c 1
 
@@ -38,10 +37,10 @@ extern "C" {
 #define gOtaErasePolicy_c gOtaEraseBeforeImageBlockReq_c
 #define gOtaVerifyWrite_d 1
 
-/*  Transaction size in posted_ops_storage set to sizeof(FLASH_TransactionOpNode_t)*/
+/*!< Transaction size in posted_ops_storage set to sizeof(FLASH_TransactionOpNode_t)*/
 #define gOtaTransactionSz_d (sizeof(FLASH_TransactionOpNode_t))
 
-/* The internal flash has a program page of 128 whereas the external flash has 256 byte pages
+/*!< The internal flash has a program page of 128 whereas the external flash has 256 byte pages
  * 256 is a good compromise.
  */
 #define PROGRAM_PAGE_SZ 256U
@@ -72,20 +71,16 @@ typedef enum
     gOtaImageTooLarge_c
 } otaResult_t;
 
+/*! Prototype of ota_completion callback */
+typedef void (*ota_op_completion_cb_t)(uint32_t param);
+
 typedef struct
 {
-    /* Only resume posted operations in Idle Task */
+    /*!< Only resume posted operations in Idle Task */
     bool PostedOpInIdleTask;
-    /* Number of transactions processed when calling OTA_TransactionResume */
+    /*!< Number of transactions processed when calling OTA_TransactionResume */
     int maxConsecutiveTransactions;
 } ota_config_t;
-
-typedef union ota_op_completion_cb
-{
-    /*! Prototype of ota_completion callback */
-    void (*func)(uint32_t param);
-    uint32_t pf;
-} ota_op_completion_cb_t;
 
 typedef enum
 {
@@ -271,6 +266,7 @@ int OTA_TransactionResume(void);
                                    buffers are required to prevent stalling.
                                    Note : Transaction size should be set to
                                    gOtaTransactionSz_d (sizeof(FLASH_TransactionOpNode_t)).
+    @warning posted_ops_storage shall be 4 bytes aligned
 * \param[in] posted_ops_sz         size in bytes of the transaction buffer.
 * \return  error code.
 *

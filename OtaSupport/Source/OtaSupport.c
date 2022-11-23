@@ -94,6 +94,13 @@ typedef struct
 
 } OtaStateCtx_t;
 
+union ota_op_completion_cb
+{
+    /*! Prototype of ota_completion callback */
+    ota_op_completion_cb_t func;
+    uint32_t               pf;
+};
+
 /******************************************************************************
 *******************************************************************************
 * Private Prototypes
@@ -162,15 +169,28 @@ otaResult_t OTA_ServiceInit(void *posted_ops_storage, size_t posted_ops_sz)
     list_status_t         status;
     list_element_handle_t list_handle;
 
+    /* FLASH_TransactionOpNode_t size shall be multiple of 4 bytes. The reason is to avoid
+        doing unaligned access when going through the transaction operation queue, this could lead to
+        crash on some toolchain (gcc) when using some instructions not supporting unaligned access*/
+    assert((sizeof(FLASH_TransactionOpNode_t) & 0x3U) == 0U);
+
     do
     {
         int                        res            = -1;
         uint8_t                    nbTransactions = (uint8_t)(posted_ops_sz / sizeof(FLASH_TransactionOpNode_t));
         FLASH_TransactionOpNode_t *pOpNode        = (FLASH_TransactionOpNode_t *)posted_ops_storage;
+        uint32_t                   posted_ops_storage_32bits;
 
+        FLib_MemCpyWord(&posted_ops_storage_32bits, &posted_ops_storage);
         /* Check arguments */
         if (posted_ops_storage == NULL)
         {
+            RAISE_ERROR(st, gOtaInvalidParam_c);
+        }
+
+        if ((posted_ops_storage_32bits & 0x3U) != 0U)
+        {
+            /* Avoid unaligned access on operation storage buffer, posted_ops_storage shall be word aligned */
             RAISE_ERROR(st, gOtaInvalidParam_c);
         }
         if ((posted_ops_sz % sizeof(FLASH_TransactionOpNode_t)) != 0U)
@@ -792,7 +812,9 @@ int OTA_TransactionResume(void)
  *****************************************************************************/
 otaResult_t OTA_MakeHeadRoomForNextBlock(uint32_t size, ota_op_completion_cb_t cb, uint32_t param)
 {
-    otaResult_t status = gOtaSuccess_c;
+    otaResult_t                status = gOtaSuccess_c;
+    union ota_op_completion_cb callback;
+    callback.func = cb;
 
     FLASH_TransactionOp_t *pMsg;
 
@@ -819,7 +841,7 @@ otaResult_t OTA_MakeHeadRoomForNextBlock(uint32_t size, ota_op_completion_cb_t c
             pMsg->flash_addr             = mHdl.ErasedUntilAddress;
             pMsg->sz                     = (int32_t)size;
             pMsg->op_type                = FLASH_OP_ERASE_NEXT_BLOCK;
-            *(uint32_t *)(&pMsg->buf[0]) = cb.pf;
+            *(uint32_t *)(&pMsg->buf[0]) = callback.pf;
             *(uint32_t *)(&pMsg->buf[4]) = param;
 
             OTA_MsgQueue(pMsg);
@@ -840,9 +862,9 @@ otaResult_t OTA_MakeHeadRoomForNextBlock(uint32_t size, ota_op_completion_cb_t c
             if (kStatus_OTA_Flash_Success == st)
             {
                 mHdl.ErasedUntilAddress = erase_addr;
-                if (cb.func != NULL)
+                if (callback.func != NULL)
                 {
-                    cb.func(param);
+                    callback.func(param);
                 }
             }
             else
@@ -1309,7 +1331,7 @@ static ota_flash_status_t OTA_TreatFlashOpEraseNextBlock(FLASH_TransactionOp_t *
 
 static ota_flash_status_t OTA_TreatFlashOpEraseNextBlockComplete(FLASH_TransactionOp_t *pMsg)
 {
-    ota_op_completion_cb_t cb;
+    union ota_op_completion_cb cb;
     cb.func        = NULL;
     uint32_t param = 0U;
 

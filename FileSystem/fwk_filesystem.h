@@ -106,7 +106,7 @@ int FS_ReadBufferFromFileLocation(const char *file_name, uint8_t *buffer, uint16
  *         File is created if it does not exist
  *         File is deleted if buf_length is 0
  */
-int FS_WriteBufferToFile(const char *file_name, uint8_t *buffer, uint32_t buf_length);
+int FS_WriteBufferToFile(const char *file_name, const uint8_t *buffer, uint32_t buf_length);
 
 /**
  * \brief Clean/Empty the File content
@@ -127,7 +127,7 @@ int FS_DeleteFile(const char *file_name);
 int FS_CheckFileSize(const char *file_name);
 
 /**
- * \brief Initialize and configure the File System using LittleF if not already done and returns File System Handle
+ * \brief Initialize and configure the File System using LittleFS if not already done and returns File System Handle
  *
  * \return pointer to file system handle
  */

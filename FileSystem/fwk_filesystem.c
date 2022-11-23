@@ -214,7 +214,7 @@ int FS_ReadBufferFromFile(const char *file_name, uint8_t *buffer, uint16_t buf_l
     return FS_ReadBufferFromFileLocation(file_name, buffer, buf_length, 0);
 }
 
-int FS_WriteBufferToFile(const char *file_name, uint8_t *buffer, uint32_t buf_length)
+int FS_WriteBufferToFile(const char *file_name, const uint8_t *buffer, uint32_t buf_length)
 {
     int res = -255;
 
@@ -233,10 +233,10 @@ int FS_WriteBufferToFile(const char *file_name, uint8_t *buffer, uint32_t buf_le
         }
         else
         {
-            int   size;
-            void *buffer_to_copy;
+            int         size;
+            const void *buffer_to_copy;
 
-            buffer_to_copy = (void *)buffer;
+            buffer_to_copy = buffer;
 
             size = lfs_file_write(&lfs, &file, buffer_to_copy, buf_length);
             if (size < 0)

@@ -89,11 +89,11 @@ static ota_flash_status_t InternalVerifyFlashProgram(uint8_t *pData, uint32_t Ad
 *******************************************************************************
 ******************************************************************************/
 
-typedef union physical_adress
+union physical_adress
 {
     uint32_t  value;
     uint32_t *pointer;
-} physical_adress;
+};
 
 /******************************************************************************
 *******************************************************************************
@@ -372,7 +372,7 @@ static ota_flash_status_t InternalFlash_FlushWriteBuffer(void)
  ***********************************************************************************/
 static ota_flash_status_t InternalFlash_ReadData(uint16_t NoOfBytes, uint32_t Addr, uint8_t *inbuf)
 {
-    physical_adress read_adress;
+    union physical_adress read_adress;
     read_adress.value = PHYS_ADDR(Addr);
     FLib_MemCpy(inbuf, read_adress.pointer, NoOfBytes);
 
@@ -496,8 +496,8 @@ static ota_flash_status_t InternalFlash_EraseArea(uint32_t *Addr, int32_t *size,
 
 static ota_flash_status_t InternalVerifyFlashProgram(uint8_t *pData, uint32_t Addr, uint16_t length)
 {
-    ota_flash_status_t status = kStatus_OTA_Flash_Success;
-    physical_adress    verify_adress;
+    ota_flash_status_t    status = kStatus_OTA_Flash_Success;
+    union physical_adress verify_adress;
     verify_adress.value = PHYS_ADDR(Addr);
     if (!FLib_MemCmp(pData, verify_adress.pointer, length))
     {
