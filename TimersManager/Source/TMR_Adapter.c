@@ -56,14 +56,6 @@
 #error "It is recommended to disable gTimestampUseWtimer_c if gSystickUseWtimer1ForSleepDuration is enabled to save power otherwise gSystickUseWtimer1ForSleepDuration should not be defined"
 #endif
 
-/************************************************************************************
-*************************************************************************************
-* Private prototypes
-*************************************************************************************
-************************************************************************************/
-extern void PWR_DisallowDeviceToSleep(void);
-extern void PWR_AllowDeviceToSleep(void);
-
 #ifndef FMEAS_SYSCON
 #if defined(FSL_FEATURE_FMEAS_USE_ASYNC_SYSCON) && (FSL_FEATURE_FMEAS_USE_ASYNC_SYSCON)
 #define FMEAS_SYSCON ASYNC_SYSCON
@@ -72,6 +64,13 @@ extern void PWR_AllowDeviceToSleep(void);
 #endif
 #endif
 
+/************************************************************************************
+*************************************************************************************
+* Private prototypes
+*************************************************************************************
+************************************************************************************/
+extern void PWR_DisallowDeviceToSleep(void);
+extern void PWR_AllowDeviceToSleep(void);
 
 /************************************************************************************
 *************************************************************************************
@@ -1166,6 +1165,27 @@ TMR_teActivityStatus TMR_eScheduleActivity32kTicks(TMR_tsActivityWakeTimerEvent 
     return TMR_eScheduleActivity32kTicksAndGetCurrentTimestampValue(psTmr, u32Ticks, prCallbackfn, NULL);
 }
 
+TMR_teActivityStatus TMR_eScheduleActivityMs(TMR_tsActivityWakeTimerEvent *psWake,
+                                   uint32_t u32TimeMs,
+                                   void (*prCallbackfn)(void))
+{
+    uint64_t              u64AdjustedTicks;
+    uint32_t              u32Ticks;
+
+    u64AdjustedTicks = TMR_Convert32kTicks2Us((uint64_t)u32TimeMs) / 1000;
+
+    if (u64AdjustedTicks > 0xffffffff)
+    {
+        /* Overflowed, so limit to maximum uint32 value */
+        u32Ticks = 0xffffffff;
+    }
+    else
+    {
+        u32Ticks = (uint32_t)u64AdjustedTicks;
+    }
+    return TMR_eScheduleActivity32kTicks(psWake, u32Ticks, prCallbackfn);
+}
+
 TMR_teActivityStatus TMR_eScheduleActivity32kTicksAndGetCurrentTimestampValue(TMR_tsActivityWakeTimerEvent *psTmr,
                                                     uint32_t u32Ticks,
                                                     void (*prCallbackfn)(void),
@@ -1847,6 +1867,247 @@ void tickless_SystickCheckDrift(void)
 #endif
     } while(0);
 #endif
+}
+#endif
+
+
+#ifndef DISABLE_TMR_ADAPTER
+#include "fsl_power.h"
+#include "fsl_inputmux.h"
+#include "fsl_inputmux_connections.h"
+#include "fsl_fmeas.h"
+
+#ifndef LpIoSet
+#define LpIoSet(x, y)
+#endif
+
+/* Calculate FRO32K frequency in 1/16 of Hertz to improve accuracy - shall not be modified */
+#define FREQ32K_CAL_SHIFT                 4
+
+static TMR_clock_32k_hk_t mHk32k = {
+    .freq32k          = 32768,
+    .freq32k_16thHz  = (32768 << FREQ32K_CAL_SHIFT), /* expressed in 16th of Hz: (1<<19) */
+};
+
+static void FRO32K_Update32kFrequency(uint32_t freq)
+{
+    if (freq != 0UL)
+    {
+        uint64_t u64_ts;
+        TMR_clock_32k_hk_t *hk = (TMR_clock_32k_hk_t *)TMR_Get32kHandle();
+
+        uint32_t val = hk->freq32k_16thHz;
+        val = ((val << FRO32K_CAL_AVERAGE) - val + freq) >> FRO32K_CAL_AVERAGE ;
+        hk->freq32k_16thHz = val;
+        hk->freq32k = (val >> FREQ32K_CAL_SHIFT);
+
+        /* update SW timestamp with new frequency estimation */
+        u64_ts = TMR_GetTimestampUs();
+        (void)u64_ts;
+
+        TMR_DBG_LOG("ts=%d freq32k=%d freq32k_16thHz=%d", (uint32_t)u64_ts, hk->freq32k, hk->freq32k_16thHz);
+
+    }
+    else
+    {
+        LpIoSet(4, 1);
+        LpIoSet(4, 0);
+        LpIoSet(4, 1);
+        LpIoSet(4, 0);
+
+#if FRO32K_CAL_INCOMPLETE_PRINTF
+        PRINTF("32K cal incomplete\r\n");
+        TMR_DBG_LOG("32K cal incomplete");
+#endif
+    }
+}
+
+void * TMR_Get32kHandle(void)
+{
+#if 1 || (cPWR_FullPowerDownMode)
+    return (void*)&mHk32k;
+#else
+    return NULL;
+#endif
+}
+
+void FRO32K_Init(void)
+{
+#if gClkRecalFro32K /* Will recalibrate 32k FRO on each warm start */
+    // TODO MCB-539: parallelize FRO32K calibration to reduce the cold boot time
+    uint32_t freq;
+    TMR_clock_32k_hk_t *hk = (TMR_clock_32k_hk_t *)TMR_Get32kHandle();
+
+    FRO32K_StartCalibration();
+    do {
+       freq = FRO32K_CompleteCalibration();
+    }  while (!freq);
+
+    hk->freq32k_16thHz = freq;
+    hk->freq32k = freq >> FREQ32K_CAL_SHIFT;
+    TMR_DBG_LOG("freq=%d", hk->freq32k);
+
+#else /* no gClkRecalFro32K */
+    /* Does selected sleep mode require 32kHz oscillator?
+        this is removed, Application shall take care of this now ...*/
+    //if (0 != (PWR_GetDeepSleepConfig() & PWR_CFG_OSC_ON))
+    {
+        bool            fmeas_clk_enable;
+        bool            mdm_clk_enable;
+        uint32_t        freqComp;
+
+        /* Check if XTAL32K has been enabled by application, otherwise
+         * enable the FRO32K and calibrate it - the XTAL32K may not be
+         * present on the board */
+        if (   (0 == (SYSCON->OSC32CLKSEL & SYSCON_OSC32CLKSEL_SEL32KHZ_MASK))
+            || (0 == (PMC->PDRUNCFG & (1UL << kPDRUNCFG_PD_XTAL32K_EN)))
+           )
+        {
+            /* Enable FRO32k */
+            CLOCK_EnableClock(kCLOCK_Fro32k);
+
+            /* Enable 32MHz XTAL if not running - FRO32K already enable if we are here*/
+            if ( !(ASYNC_SYSCON->XTAL32MCTRL & ASYNC_SYSCON_XTAL32MCTRL_XO32M_TO_MCU_ENABLE_MASK) )
+            {
+                CLOCK_EnableClock(kCLOCK_Xtal32M);
+            }
+
+            /* Fmeas clock gets enabled by the generic calibration code, so note if we
+               should disable it again afterwards */
+            fmeas_clk_enable = CLOCK_IsClockEnable(kCLOCK_Fmeas);
+
+            /* RFT1366 requires BLE LP clock to be used for 32kHz measurement. It gets
+               enabled within the generic calibration code, so note if we should
+               disable it again afterwards */
+            mdm_clk_enable = SYSCON->MODEMCTRL & SYSCON_MODEMCTRL_BLE_LP_OSC32K_EN_MASK;
+
+            /* Call Low Power function to start calibration */
+            FRO32K_StartCalibration();
+
+            /* Call Low Power function to wait for end of calibration */
+            do
+            {
+                freqComp = FRO32K_CompleteCalibration();
+            } while (0 == freqComp);
+            /* freqComp is returned in 16th of Hz */
+            /* Disable the clocks if disable previously */
+            if ( !fmeas_clk_enable )
+            {
+                CLOCK_DisableClock(kCLOCK_Fmeas);
+            }
+
+            if ( !mdm_clk_enable )
+            {
+                SYSCON->MODEMCTRL &= ~SYSCON_MODEMCTRL_BLE_LP_OSC32K_EN(1);
+            }
+
+            mHk32k.freq32k_16thHz = freqComp;
+            mHk32k.freq32k = freqComp >> FREQ32K_CAL_SHIFT;
+        }
+        else
+        {
+            /* Case of the Xtal32k */
+            mHk32k.freq32k_16thHz = 32768 << FREQ32K_CAL_SHIFT;
+            mHk32k.freq32k = 32768;
+        }
+    }
+#endif /* gClkRecalFro32K */
+}
+
+/* suppose 32MHz crystal is running and 32K running */
+void FRO32K_StartCalibration(void)
+{
+    INPUTMUX_Init(INPUTMUX);
+
+    /* Setup to measure the selected target */
+    INPUTMUX_AttachSignal(INPUTMUX, 1U, kINPUTMUX_Xtal32MhzToFreqmeas);
+    INPUTMUX_AttachSignal(INPUTMUX, 0U, kINPUTMUX_32KhzOscToFreqmeas);
+
+    /* Temporary fix for RFT1366 : JN518x Frequency measure does not work 32kHz
+       if used for target clock */
+    SYSCON->MODEMCTRL |= SYSCON_MODEMCTRL_BLE_LP_OSC32K_EN(1);
+
+    CLOCK_EnableClock(kCLOCK_Fmeas);
+
+    /* Start a measurement cycle and wait for it to complete. If the target
+       clock is not running, the measurement cycle will remain active
+       forever, so a timeout may be necessary if the target clock can stop */
+    FMEAS_StartMeasureWithScale(FMEAS_SYSCON, FRO32K_CAL_SCALE);
+}
+
+// Return the result in unit of 1/(2^freq_scale)th of Hertz for higher accuracy
+uint32_t FRO32K_CompleteCalibration(void)
+{
+    uint32_t        freqComp    = 0U;
+    uint32_t        refCount    = 0U;
+    uint32_t        targetCount = 0U;
+    uint32_t        freqRef     = CLOCK_GetFreq(kCLOCK_Xtal32M);
+
+    if (FMEAS_IsMeasureComplete(FMEAS_SYSCON))
+    {
+        /* Get computed frequency */
+        FMEAS_GetCountWithScale(FMEAS_SYSCON, FRO32K_CAL_SCALE, &refCount, &targetCount);
+        freqComp = (uint32_t)(((((uint64_t)freqRef)*refCount)<<FREQ32K_CAL_SHIFT) / targetCount);
+
+        /* Disable the clocks if disable previously */
+        CLOCK_DisableClock(kCLOCK_Fmeas);
+
+        /* update frequency estimation with new measurement */
+        FRO32K_Update32kFrequency(freqComp);
+    }
+
+    return freqComp;
+}
+
+
+uint64_t TMR_Convert32kTicks2Us(uint64_t u64ticks)
+{
+    uint32_t freqHz = mHk32k.freq32k;
+    uint64_t u64TimeUs;
+
+    u64TimeUs = u64ticks * 1000000 / freqHz;
+
+    return u64TimeUs;
+}
+
+uint64_t TMR_ConvertUsToTicks(uint64_t u64timeUs)
+{
+    uint32_t freqHz = mHk32k.freq32k;
+    uint64_t u64AdjustedTicks;
+
+    u64AdjustedTicks = u64timeUs * freqHz / 1000000;
+    return u64AdjustedTicks;
+}
+
+uint64_t TMR_GetTimestampUs(void)
+{
+    static uint64_t u64SwTimestampUs = 0;
+    static uint64_t u64HwTimestampTick = 0;
+
+    uint64_t additional_timestamp_us;
+    uint64_t u64HwTimestampTick_new;
+    uint64_t wrapped_val = 0;
+
+    OSA_DisableIRQGlobal();
+
+    /* Get new HW 32bit HW timestamp */
+    u64HwTimestampTick_new = (uint64_t)Timestamp_GetCounter32bit();
+
+    if (u64HwTimestampTick > u64HwTimestampTick_new)
+    {
+        /* counter has wrapped */
+        wrapped_val = 0xFFFFFFFF;
+    }
+
+    additional_timestamp_us   = TMR_Convert32kTicks2Us((uint32_t)( (u64HwTimestampTick_new+wrapped_val)-u64HwTimestampTick) );
+    u64SwTimestampUs         +=additional_timestamp_us;
+
+    /* store HW timestamp for next time so the timebase drift is calculated from next period only */
+    u64HwTimestampTick     = u64HwTimestampTick_new;
+
+    OSA_EnableIRQGlobal();
+
+    return u64SwTimestampUs;
 }
 #endif
 

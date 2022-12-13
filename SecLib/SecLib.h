@@ -1,6 +1,6 @@
 /*! *********************************************************************************
 * Copyright (c) 2015, Freescale Semiconductor, Inc.
-* Copyright 2016-2018 NXP
+* Copyright 2016-2022 NXP
 * All rights reserved.
 *
 * \file
@@ -20,6 +20,14 @@
 *************************************************************************************
 ********************************************************************************** */
 #include "EmbeddedTypes.h"
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+//#define NCCL_DEBUG
+#ifdef NCCL_DEBUG
+#include "dbg_logging.h"
+#endif
 
 #ifndef gSecLibUseMutex_c
 #define gSecLibUseMutex_c   TRUE
@@ -30,7 +38,12 @@
 #define gSecLibAESMethodSelectionDynHwSw_c 0
 #endif
 
-#define mRevertEcdhKeys_d   1
+/* Must be defined as 1 if switch mechanism between hardware
+ * and software SHA256 has to be used. */
+#ifndef gSecLibUseSha256Alt_d
+#define gSecLibUseSha256Alt_d 0
+#endif
+
 
 /*! *********************************************************************************
 *************************************************************************************
@@ -83,11 +96,6 @@
 #endif
 
 
-/*! How many steps to use for the EC multiplication procedure */
-#ifndef gSecLibEcStepsAtATime
-#define gSecLibEcStepsAtATime   16U
-#endif
-
 /*! *********************************************************************************
 *************************************************************************************
 * Public type definitions
@@ -102,41 +110,8 @@ typedef enum
     gSecResultPending_c     = 4u
 } secResultType_t;
 
-typedef enum ecdhStatus_tag {
-    gEcdhSuccess_c,
-    gEcdhBadParameters_c,
-    gEcdhOutOfMemory_c,
-    gEcdhRngError_c,
-    gEcdhInvalidState_c,
-    gEcdhInvalidPublicKey_c
-} ecdhStatus_t;
 
-typedef union ecdhPrivateKey_tag {
-    uint8_t  raw_8bit[32];
-    uint32_t raw_32bit[8];
-} ecdhPrivateKey_t;
 
-#if !defined (__IAR_SYSTEMS_ICC__)
-#pragma GCC diagnostic ignored "-Wpacked"
-#pragma GCC diagnostic ignored "-Wattributes"
-#endif
-typedef PACKED_UNION ecdhPoint_tag {
-    uint8_t raw[64];
-    PACKED_STRUCT {
-        uint8_t x[32];
-        uint8_t y[32];
-    } components_8bit;
-    PACKED_STRUCT {
-        uint32_t x[8];
-        uint32_t y[8];
-    } components_32bit;
-} ecdhPoint_t;
-#if !defined (__IAR_SYSTEMS_ICC__)
-#pragma GCC diagnostic pop  
-#endif
-typedef ecdhPoint_t ecdhPublicKey_t;
-
-typedef ecdhPoint_t ecdhDhKey_t;
 
 /* Security block definition */
 typedef union
@@ -156,22 +131,7 @@ typedef struct
     uint32_t u32register3;
 } tsReg128;
 
-typedef struct computeDhKeyParams_tag{
-    ecdhPrivateKey_t privateKey;    /*!< Secret */
-    ecdhPublicKey_t peerPublicKey;  /*!< Peer public key */
-    ecdhPoint_t outPoint;           /*!< The resulting point */
-    void *pWorkBuffer;              /*!< Pointer to the buffer used for computation */
-    uint8_t procStep;               /*!< The step used for segmented computation */
-    uint32_t aUserData[1];          /*!< Hold upper layer private data */
-} computeDhKeyParam_t;
 
-typedef void(*secLibCallback_t)(computeDhKeyParam_t* pData);
-
-/************************************************************************************
-*************************************************************************************
-* Public memory declarations
-*************************************************************************************
-************************************************************************************/
 
 /************************************************************************************
 *************************************************************************************
@@ -179,7 +139,7 @@ typedef void(*secLibCallback_t)(computeDhKeyParam_t* pData);
 *************************************************************************************
 ************************************************************************************/
 
-#ifdef __cplusplus 
+#ifdef __cplusplus
 extern "C" {
 #endif
 
@@ -189,22 +149,26 @@ extern "C" {
 ********************************************************************************** */
 void SecLib_Init (void);
 
-/*! *********************************************************************************
-* \brief  This function performs initialization of the callback used to offload
-* elliptic curve multiplication.
-*
-* \param[in]  pfCallback Pointer to the function used to handle multiplication.
-*
-********************************************************************************** */
-void SecLib_SetExternalMultiplicationCb(secLibCallback_t pfCallback);
+
 
 /*! *********************************************************************************
-* \brief  This function performs calls the multiplication Callback.
+* \brief  Process current AES operation described by the context.
+*         It wraps ROM API and offers mutex protection and protection
+*         against ISR interruption.
 *
-* \param[in]  pMsg Pointer to the data used in multiplication.
+* \param[in]  pContext Software context that holds AES data (key, mode).
+*
+* \param[in]  pBlockIn Pointer to the location of the input (plaintext/ciphertext).
+*
+* \param[in]  pBlockOut Pointer to the location of the output (plaintext/ciphertext).
+*
+* \param[in]  numBlocks Number of 16 bytes blocks to be processed.
 *
 ********************************************************************************** */
-void SecLib_ExecMultiplicationCb(computeDhKeyParam_t *pMsg);
+uint32_t AES_128_ProcessBlocks(const void* pContext,
+                               uint32_t* pBlockIn,
+                               uint32_t* pBlockOut,
+                               uint32_t  numBlocks);
 
 /*! *********************************************************************************
 * \brief  This function performs AES-128 encryption on a 16-byte block.
@@ -281,7 +245,7 @@ void AES_128_CBC_Encrypt (const uint8_t*  pInput,
 *
 * \param[in]  pInput Pointer to the location of the input message.
 *
-* \param[in]  inputLen Input message length in bytes. 
+* \param[in]  inputLen Input message length in bytes.
 *
 *             IMPORTANT: User must make sure that input and output
 *             buffers have at least inputLen + 16 bytes size
@@ -341,7 +305,7 @@ uint32_t AES_128_CBC_Decrypt_And_Depad (const uint8_t* pInput,
 ********************************************************************************** */
 void AES_128_CTR (const uint8_t*  pInput,
                   uint32_t  inputLen,
-                  uint8_t*  pCounter, 
+                  uint8_t*  pCounter,
                   const uint8_t*  pKey,
                   uint8_t*  pOutput);
 
@@ -368,7 +332,7 @@ void AES_128_CMAC (const  uint8_t* pInput,
 /*! *********************************************************************************
 * \brief  This function performs AES-128-CMAC on a message block accepting input data
 *         which is in LSB first format and computing the authentication code starting from the end of the data.
-* 
+*
 * \param[in]  pInput Pointer to the location of the input message.
 *
 * \param[in]  inputLen Length of the input message in bytes. The input data must be provided LSB first.
@@ -386,7 +350,7 @@ void AES_128_CMAC_LsbFirstInput (const uint8_t*   pInput,
 /*! *********************************************************************************
 * \brief  This function performs AES 128 CMAC Pseudo-Random Function (AES-CMAC-PRF-128),
 *         according to rfc4615, on a message block.
-* 
+*
 * \details The AES-CMAC-PRF-128 algorithm behaves similar to the AES CMAC 128 algorithm
 *          but removes 128 bit key size restriction.
 *
@@ -402,7 +366,7 @@ void AES_128_CMAC_LsbFirstInput (const uint8_t*   pInput,
 *
 ********************************************************************************** */
 void AES_CMAC_PRF_128 (uint8_t* pInput,
-                       uint32_t inputLen, 
+                       uint32_t inputLen,
                        uint8_t* pVarKey,
                        uint32_t varKeyLen,
                        uint8_t* pOutput);
@@ -434,7 +398,7 @@ secResultType_t AES_128_EAX_Encrypt (uint8_t*   pInput,
                                      uint8_t*   pNonce,
                                      uint32_t   nonceLen,
                                      uint8_t*   pHeader,
-                                     uint8_t    headerLen, 
+                                     uint8_t    headerLen,
                                      uint8_t*   pKey,
                                      uint8_t*   pOutput,
                                      uint8_t*   pTag);
@@ -466,11 +430,11 @@ secResultType_t AES_128_EAX_Decrypt (uint8_t*   pInput,
                                      uint8_t*   pNonce,
                                      uint32_t   nonceLen,
                                      uint8_t*   pHeader,
-                                     uint8_t    headerLen, 
+                                     uint8_t    headerLen,
                                      uint8_t*   pKey,
                                      uint8_t*   pOutput,
                                      uint8_t*   pTag);
-                                    
+
 /*! *********************************************************************************
 * \brief  This function performs AES-128-CCM on a message block.
 *
@@ -478,7 +442,7 @@ secResultType_t AES_128_EAX_Decrypt (uint8_t*   pInput,
 *
 * \param[in]  inputLen     Length of the input plaintext in bytes when encrypting.
 *                          Length of the input cyphertext without the MAC length when decrypting.
-* 
+*
 * \param[in]  pAuthData    Pointer to the additional authentication data.
 *
 * \param[in]  authDataLen  Length of additional authentication data.
@@ -557,7 +521,7 @@ void SHA1_Init (void* pContext);
 * \param [in]    numBytes    Number of bytes to hash
 *
 ********************************************************************************** */
-void SHA1_HashUpdate (void*     pContext, 
+void SHA1_HashUpdate (void*     pContext,
                       const uint8_t*  pData,
                       uint32_t  numBytes);
 
@@ -570,11 +534,11 @@ void SHA1_HashUpdate (void*     pContext,
 * \param [out]      pOutput     Pointer to the output location
 *
 ********************************************************************************** */
-void SHA1_HashFinish (void*     pContext, 
+void SHA1_HashFinish (void*     pContext,
                       uint8_t*  pOutput);
 
 /*! *********************************************************************************
-* \brief  This function performs all SHA1 steps on multiple bytes: initialize, 
+* \brief  This function performs all SHA1 steps on multiple bytes: initialize,
 *         update and finish.
 *         The final hash value is stored at the provided output location.
 *
@@ -586,7 +550,40 @@ void SHA1_HashFinish (void*     pContext,
 void SHA1_Hash (const uint8_t*    pData,
                 const uint32_t    numBytes,
                 uint8_t*    pOutput);
-                    
+
+/*! *********************************************************************************
+* \brief  Initialize the SHA256 context data in SW.
+*         SHA256_SW_* API was introduced to take into account lengthy SHA256
+*         operations, which would block access to the hardware module. Instead,
+*         software SHA256 can be used. Such an example is in Matter, where a
+*         SHA256 process is started at initialization phase and it's finished
+*         after the commissioning was successful.
+*
+* \param [in]    pContext    Pointer to the SHA256 context data
+*
+********************************************************************************** */
+void SHA256_SW_Init(void* pContext);
+
+/*! *********************************************************************************
+* \brief  Perform SW SHA256 on multiple bytes and updates the context data.
+*
+* \param [in]    pContext    Pointer to the SHA256 context data
+* \param [in]    pData       Pointer to the input data
+* \param [in]    numBytes    Number of bytes to hash
+*
+********************************************************************************** */
+void SHA256_SW_Update(void* pContext, const uint8_t* pData, uint32_t numBytes);
+
+/*! *********************************************************************************
+* \brief  Finalize the SW SHA256 hash computation and clear the context data.
+*         The final hash value is stored at the provided output location.
+*
+* \param [in]       pContext    Pointer to the SHA256 context data
+* \param [out]      pOutput     Pointer to the output location
+*
+********************************************************************************** */
+void SHA256_SW_Finish(void* pContext, uint8_t* pOutput);
+
 /*! *********************************************************************************
 * \brief  This function allocates a memory buffer for a SHA256 context structure
 *
@@ -615,7 +612,7 @@ void SHA256_FreeCtx (void* pContext);
 void SHA256_CloneCtx (void* pDestCtx, void* pSourceCtx);
 
 /*! *********************************************************************************
-* \brief  This function initializes the SHA256 context data
+* \brief  This function initializes the SHA256 context data.
 *
 * \param [in]    pContext    Pointer to the SHA256 context data
 *                            Allocated using SHA256_AllocCtx()
@@ -632,7 +629,7 @@ void SHA256_Init (void* pContext);
 * \param [in]    numBytes    Number of bytes to hash
 *
 ********************************************************************************** */
-void SHA256_HashUpdate (void*       pContext, 
+void SHA256_HashUpdate (void*       pContext,
                         const uint8_t*    pData,
                         uint32_t    numBytes);
 
@@ -645,11 +642,14 @@ void SHA256_HashUpdate (void*       pContext,
 * \param [out]      pOutput     Pointer to the output location
 *
 ********************************************************************************** */
-void SHA256_HashFinish (void*       pContext, 
-                        uint8_t*    pOutput);
+void SHA256_HashFinish
+(
+    void*       pContext,
+    uint8_t*    pOutput
+);
 
 /*! *********************************************************************************
-* \brief  This function performs all SHA256 steps on multiple bytes: initialize, 
+* \brief  This function performs all SHA256 steps on multiple bytes: initialize,
 *         update and finish.
 *         The final hash value is stored at the provided output location.
 *
@@ -658,9 +658,12 @@ void SHA256_HashFinish (void*       pContext,
 * \param [out]      pOutput     Pointer to the output location
 *
 ********************************************************************************** */
-void SHA256_Hash (const uint8_t*  pData,
-                  const uint32_t  numBytes,
-                  uint8_t*  pOutput);
+void SHA256_Hash
+(
+    const uint8_t*  pData,
+    const uint32_t  numBytes,
+    uint8_t*  pOutput
+);
 
 /*! *********************************************************************************
 * \brief  This function allocates a memory buffer for a HMAC SHA256 context structure
@@ -669,7 +672,10 @@ void SHA256_Hash (const uint8_t*  pData,
 *            Deallocate using HMAC_SHA256_FreeCtx()
 *
 ********************************************************************************** */
-void* HMAC_SHA256_AllocCtx (void);
+void* HMAC_SHA256_AllocCtx
+(
+    void
+);
 
 /*! *********************************************************************************
 * \brief  This function deallocates the memory buffer for the HMAC SHA256 context structure
@@ -677,7 +683,10 @@ void* HMAC_SHA256_AllocCtx (void);
 * \param [in]    pContext    Address of the HMAC SHA256 context buffer
 *
 ********************************************************************************** */
-void HMAC_SHA256_FreeCtx (void* pContext);
+void HMAC_SHA256_FreeCtx
+(
+    void* pContext
+);
 
 /*! *********************************************************************************
 * \brief  This function performs the initialization of the HMAC SHA256 context data
@@ -688,9 +697,12 @@ void HMAC_SHA256_FreeCtx (void* pContext);
 * \param [in]    keyLen      Length of the HMAC key in bytes
 *
 ********************************************************************************** */
-void HMAC_SHA256_Init (void*    pContext,
-                       uint8_t* pKey,
-                       uint32_t keyLen);
+void HMAC_SHA256_Init
+(
+    void         *pContext,
+    const uint8_t *InKey,
+    const size_t  keyLen
+);
 
 /*! *********************************************************************************
 * \brief  This function performs HMAC update with the input data.
@@ -701,9 +713,12 @@ void HMAC_SHA256_Init (void*    pContext,
 * \param [in]    numBytes    Number of bytes to hash
 *
 ********************************************************************************** */
-void HMAC_SHA256_Update (void*      pContext,
-                         uint8_t*   pData,
-                         uint32_t   numBytes);
+void HMAC_SHA256_Update
+(
+    void          *pContext,
+    const uint8_t *pData,
+    uint32_t      numBytes
+);
 
 /*! *********************************************************************************
 * \brief  This function finalizes the HMAC SHA256 computation and clears the context data.
@@ -714,11 +729,14 @@ void HMAC_SHA256_Update (void*      pContext,
 * \param [out]      pOutput     Pointer to the output location
 *
 ********************************************************************************** */
-void HMAC_SHA256_Finish (void*      pContext,
-                         uint8_t*   pOutput);
+void HMAC_SHA256_Finish
+(
+    void     *pContext,
+    uint8_t  *pOutput
+);
 
 /*! *********************************************************************************
-* \brief  This function performs all HMAC SHA256 steps on multiple bytes: initialize, 
+* \brief  This function performs all HMAC SHA256 steps on multiple bytes: initialize,
 *         update, finish, and update context data.
 *         The final HMAC value is stored at the provided output location.
 *
@@ -729,11 +747,14 @@ void HMAC_SHA256_Finish (void*      pContext,
 * \param [out]      pOutput     Pointer to the output location
 *
 ********************************************************************************** */
-void HMAC_SHA256 (uint8_t*  pKey,
-                  uint32_t  keyLen,
-                  uint8_t*  pData,
-                  uint32_t  numBytes,
-                  uint8_t*  pOutput);
+void HMAC_SHA256
+(
+    const uint8_t *pKey,
+    const size_t  keyLen,
+    const uint8_t *pData,
+    const size_t  numBytes,
+    uint8_t       *pOutput
+);
 
 /*! *********************************************************************************
 * \brief  This function calculates XOR of individual byte pairs in two uint8_t arrays.
@@ -751,84 +772,12 @@ void SecLib_XorN (uint8_t*  pDst,   /* First operand and result of XOR operation
                   uint8_t   n);     /* Number of bytes in input arrays. */
 
 
-/************************************************************************************
-* \brief Generates a new ECDH P256 Private/Public key pair
-*
-* \return gSecSuccess_c or error
-* 
-************************************************************************************/
-secResultType_t ECDH_P256_GenerateKeys
-(
-    ecdhPublicKey_t*    pOutPublicKey,
-    ecdhPrivateKey_t*   pOutPrivateKey
-);
 
-/************************************************************************************
-* \brief Generates a new ECDH P256 Private/Public key pair. This function starts the
-*        ECDH generate procedure. The pDhKeyData must be allocated and kept
-*        allocated for the time of the computation procedure.
-*        When the result is gSecResultPending_c the memory should be kept until the
-*        last step.
-*        In any other result messages the data shall be cleared after this call.
-*
-* \param[in]  pDhKeyData Pointer to the structure holding information about the
-*                        multiplication
-*
-* \return gSecSuccess_c, gSecResultPending_c or error
-*
-************************************************************************************/
-secResultType_t ECDH_P256_GenerateKeysSeg
-(
-    computeDhKeyParam_t *pDhKeyData
-);
 
-/************************************************************************************
-* \brief Computes the Diffie-Hellman Key for an ECDH P256 key pair.
-*
-* \return gSecSuccess_c or error
-* 
-************************************************************************************/
-secResultType_t ECDH_P256_ComputeDhKey
-(
-    ecdhPrivateKey_t*   pInPrivateKey,
-    ecdhPublicKey_t*    pInPeerPublicKey,
-    ecdhDhKey_t*        pOutDhKey
-);
-/************************************************************************************
-* \brief Handle one step of ECDH multiplication depending on the number of steps at
-*        a time according to gSecLibEcStepsAtATime. After the last step is completed
-*        the function returns TRUE and the upper layer is responsible for clearing
-*        pData.
-*
-* \param[in]  pData Pointer to the structure holding information about the
-*                   multiplication
-*
-* \return TRUE if the multiplication is completed
-*         FALSE when the function needs to be called again
-*
-************************************************************************************/
-bool_t SecLib_HandleMultiplyStep
-(
-    computeDhKeyParam_t *pData
-);
-/************************************************************************************
-* \brief Computes the Diffie-Hellman Key for an ECDH P256 key pair. This function
-*        starts the ECDH key pair generate procedure. The pDhKeyData must be
-*        allocated and kept allocated for the time of the computation procedure.
-*        When the result is gSecResultPending_c the memory should be kept until the
-*        last step, when it can be safely freed.
-*        In any other result messages the data shall be cleared after this call.
-*
-* \param[in]  pDhKeyData Pointer to the structure holding information about the
-*                        multiplication
-*
-* \return gSecSuccess_c or error
-*
-************************************************************************************/
-secResultType_t ECDH_P256_ComputeDhKeySeg
-(
-    computeDhKeyParam_t *pDhKeyData
-);
+
+
+
+
 /****************************************************************************
  * \brief Perform an MMO Block Update on the hash
  *        H[j] = E(H[j-1], M[j]) ^ M[j]
@@ -888,23 +837,6 @@ void AES_128_CTR_Decrypt(uint8_t* pInput,
                          uint8_t* pKey,
                          uint8_t* pOutput);
 
-/*! *********************************************************************************
-* \brief  This function performs AES-128-CTR decryption on a message block.
-*
-* \param[in]  pInput Pointer to the location of the input message.
-* \param[in]  inputLen Input message length in bytes.
-* \param[in]  pCounter Pointer to the location of the 128-bit counter.
-* \param[in]  pKey Pointer to the location of the 128-bit key.
-* \param[out]  pOutput Pointer to the location to store the ciphered output.
-*
-********************************************************************************** */
-void AES_128_CTR_Decrypt(uint8_t* pInput,
-             uint32_t inputLen,
-             uint8_t* pCounter,
-             uint8_t* pKey,
-             uint8_t* pOutput);
-
-
 /****************************************************************************
  * \brief This function setups the key in the AES.
  *
@@ -944,23 +876,7 @@ void vACI_OptimisedCcmStar(bool_t         bEncrypt,
                            uint8_t       *pau8Data,
                            uint8_t       *pau8checksumData,
                            bool_t        *pbChecksumVerify);
-/****************************************************************************
- *
- * NAME:       u32Reverse
- */
-/**
- * Reverses 32bit data
- *
- * @ingroup grp_aes_sw
- *
- * @param u32InWord  Input 32-bit data
- *
- * @return u32OutWord Output reversed 32- bit data
- *
- * @note
- *
- ****************************************************************************/
-uint32_t u32Reverse(uint32_t u32InWord);
+
 
 /****************************************************************************
  *
@@ -975,7 +891,7 @@ uint32_t u32Reverse(uint32_t u32InWord);
  *
  * @param psReg  128 bit data of type  tsReg128
  *
- * @param bBlockToReg  direction of converesion
+ * @param bBlockToReg  direction of conversion
  *                      1 = AESSW_Block_u to tsReg128
  *                      0 = tsReg128 to AESSW_Block_u
  *
@@ -987,13 +903,13 @@ uint32_t u32Reverse(uint32_t u32InWord);
 void vSwipeEndian( AESSW_Block_u *puBlock,
                    tsReg128 *psReg,
                    bool_t bBlockToReg );
- 
+
 
 
 #if (gSecLibAESMethodSelectionDynHwSw_c > 0)
 /****************************************************************************
  * NAME:       SecLib_AES_HW_Accelerator_disable
- * 
+ *
  * @ingroup grp_aes_sw
  *
  * @param DisableNEnable  if set to true disables use of AES HW accelerator and switches to SW implementation
@@ -1005,21 +921,27 @@ void SecLib_AES_HW_Accelerator_disable(bool_t DisableNEnable);
 
 /****************************************************************************
  * NAME:       SecLib_AES_Is_HW_Accelerator_disabled
- * 
+ *
  * @ingroup grp_aes_sw
  *
- * @return  true if HW accelerator is disallowed, false otherwise 
+ * @return  true if HW accelerator is disallowed, false otherwise
  *
  *
  ****************************************************************************/
 bool_t  SecLib_AES_Is_HW_Accelerator_disabled(void);
-
 #endif
 
 
-
-
-#ifdef __cplusplus 
+#if defined gLoggingActive_d && (gLoggingActive_d > 0)
+#include "dbg_logging.h"
+#ifndef DBG_SEC
+#define DBG_SEC 0
+#endif
+#define SEC_DBG_LOG(fmt, ...)   if (DBG_SEC) do { DbgLogAdd(__FUNCTION__ , fmt, VA_NUM_ARGS(__VA_ARGS__), ##__VA_ARGS__); } while (0);
+#else
+#define SEC_DBG_LOG(...)
+#endif
+#ifdef __cplusplus
 }
 #endif
 

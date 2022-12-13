@@ -109,16 +109,9 @@ while the loading of image from external EEPROM to internal Flash is in progress
 #define ROM_API_aesLoadKeyFromSW         THUMB_ENTRY(0x030012a8)
 #define ROM_API_aesProcess               THUMB_ENTRY(0x030013d0)
 #define ROM_API_aesMode                  THUMB_ENTRY(0x03001210)
-#define ROM_API_efuse_LoadUniqueKey      THUMB_ENTRY(0x030016f4)
-#define ROM_API_aesLoadKeyFromOTP        THUMB_ENTRY(0x0300146c)
 
 typedef bool (*efuse_AESKeyPresent_t)(void);
-typedef int (*efuse_LoadUniqueKey_t)(void);
-typedef uint32_t (*aesLoadKeyFromOTP_t)(AES_KEY_SIZE_T keySize);
-
-static const efuse_LoadUniqueKey_t efuse_LoadUniqueKey   = (efuse_LoadUniqueKey_t)ROM_API_efuse_LoadUniqueKey;
-static const aesLoadKeyFromOTP_t aesLoadKeyFromOTP       = (aesLoadKeyFromOTP_t)ROM_API_aesLoadKeyFromOTP;
-static const efuse_AESKeyPresent_t efuse_AESKeyPresent   = (efuse_AESKeyPresent_t)ROM_API_efuse_AESKeyPresent;
+static const efuse_AESKeyPresent_t efuse_AESKeyPresent = (efuse_AESKeyPresent_t)ROM_API_efuse_AESKeyPresent;
 
 
 #if gUsePasswordCiphering_d
@@ -262,8 +255,6 @@ static otaResult_t OTA_ReadDecipher(uint16_t NoOfBytes, uint32_t Addr, uint8_t *
 *******************************************************************************
 ******************************************************************************/
 
-
-
 static OtaFlashTaskContext_t mHandle = {
         .LoadOtaImageInEepromInProgress = FALSE,
         .OtaImageTotalLength = 0,
@@ -366,7 +357,7 @@ otaResult_t OTA_RegisterToFsci( uint32_t fsciInterface, otaServer_AppCB_t *pCB)
 * \return
 * none
 *
-* 
+*
 ********************************************************************************** */
 void OTA_AlignOnReset(void)
 {
@@ -1556,7 +1547,7 @@ static otaResult_t OTA_CipherWrite(uint16_t NoOfBytes, uint32_t Addr, uint8_t *o
             if (padding_sz)
             {
                 /* Fill with ISO padding */
-                outbuf[NoOfBytes++] = 0x80;
+                outbuf[NoOfBytes++] = 0x80;    // how can we ensure there is space for padding?
                 for (uint8_t i = 0; i < padding_sz-1; i++ )
                 {
                     outbuf[NoOfBytes++] = 0;
@@ -1573,19 +1564,19 @@ static otaResult_t OTA_CipherWrite(uint16_t NoOfBytes, uint32_t Addr, uint8_t *o
         FLib_MemCpy(&temp_buf[0], &outbuf[0],  NoOfBytes); /* keep plain text copy */
 #endif  /*gOtaVerifyWrite_d */
 
+        aesContext_t aesContext;
         /* Perform ciphering in place */
         switch (mHandle.ciphered_mode) {
         case eEfuseKey:
-            efuse_LoadUniqueKey();
-            aesLoadKeyFromOTP(AES_KEY_128BITS);
-            aesMode(AES_MODE_ECB_ENCRYPT, AES_INT_BSWAP | AES_OUTT_BSWAP);
-            aesProcess((uint32_t*)&outbuf[0], (uint32_t*)&outbuf[0], nb_blocks);
+            OtaUtils_AesLoadKeyFromOTP(&aesContext, AES_KEY_128BITS);
+            OtaUtils_AesSetMode(&aesContext, AES_MODE_ECB_ENCRYPT, AES_INT_BSWAP | AES_OUTT_BSWAP);
+            OtaUtils_AesProcessBlocks(&aesContext, (uint32_t*)&outbuf[0], (uint32_t*)&outbuf[0], nb_blocks);
             check_ok = true;
             break;
         case eSoftwareKey:
-            aesLoadKeyFromSW(AES_KEY_128BITS, (uint32_t*)&mHandle.aes_key);
-            aesMode(AES_MODE_ECB_ENCRYPT, AES_INT_BSWAP | AES_OUTT_BSWAP);
-            aesProcess((uint32_t*)&outbuf[0], (uint32_t*)&outbuf[0], nb_blocks);
+            OtaUtils_AesLoadKeyFromSW(&aesContext, AES_KEY_128BITS, (uint32_t*)&mHandle.aes_key);
+            OtaUtils_AesSetMode(&aesContext, AES_MODE_ECB_ENCRYPT, AES_INT_BSWAP | AES_OUTT_BSWAP);
+            OtaUtils_AesProcessBlocks(&aesContext, (uint32_t*)&outbuf[0], (uint32_t*)&outbuf[0], nb_blocks);
             check_ok = true;
             break;
         default:
@@ -1665,7 +1656,7 @@ static otaResult_t OTA_ReadDecipher(uint16_t NoOfBytes, uint32_t Addr, uint8_t *
 *****************************************************************************/
 static uint32_t OTA_GetMaxAllowedArchSize(void)
 {
-#if gEepromType_d == gEepromDevice_InternalFlash_c 
+#if gEepromType_d == gEepromDevice_InternalFlash_c
     uint32_t current_app_stated_size = (*(uint32_t *)((*(uint32_t *)BOOT_BLOCK_OFFSET_VALUE)+APP_STATED_SIZE_OFFSET));
 
     return gFlashMaxStatedSize*2 - current_app_stated_size;

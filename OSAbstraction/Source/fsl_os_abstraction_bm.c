@@ -1355,6 +1355,17 @@ void OSA_InstallIntHandler(uint32_t IRQNumber, void (*handler)(void))
 #endif
 }
 
+/*FUNCTION**********************************************************************
+ *
+ * Function Name : OSA_InIsrContext
+ * Description   : self explanatory.
+ *
+ *END**************************************************************************/
+bool_t OSA_InIsrContext(void)
+{
+    return __get_IPSR();
+}
+
 /*! *********************************************************************************
 *************************************************************************************
 * Private functions

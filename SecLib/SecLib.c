@@ -1,6 +1,6 @@
 /*! *********************************************************************************
 * Copyright (c) 2015, Freescale Semiconductor, Inc.
-* Copyright 2016-2018 NXP
+* Copyright 2016-2022 NXP
 * All rights reserved.
 *
 * \file
@@ -20,20 +20,29 @@
 #include "MemManager.h"
 #include "FunctionLib.h"
 #include "SecLib.h"
+#include "SecLib_ecp256.h"
 #include "fsl_device_registers.h"
 #include "fsl_os_abstraction.h"
 #include "Panic.h"
+#include <stddef.h>
+#ifdef NCCL_DEBUG
+#include "dbg_logging.h"
+#endif
+#include "rom_aes.h"
+
+extern void dump_octet_string(const char * str, const unsigned char * data, size_t len);
 
 #if defined FSL_FEATURE_SOC_AES_COUNT &&  (FSL_FEATURE_SOC_AES_COUNT > 0)
 #define JN_AES_HW_ACC 1
 #else
 #define JN_AES_HW_ACC 0
 #endif
-#if defined FSL_FEATURE_SOC_SHA_COUNT && (FSL_FEATURE_SOC_SHA_COUNT > 0)
+#if (defined FSL_FEATURE_SOC_SHA_COUNT && (FSL_FEATURE_SOC_SHA_COUNT > 0))
 #define JN_SHA_HW_ACC 1
 #else
 #define JN_SHA_HW_ACC 0
 #endif
+
 #if (defined FSL_FEATURE_SOC_MMCAU_COUNT &&  (FSL_FEATURE_SOC_MMCAU_COUNT > 0))
 #define MMCAU_HW_ACC 1
 #else
@@ -74,7 +83,7 @@
   #ifdef CPU_QN908X
   #include "aes_reg_access.h"
   #include "fsl_aes.h"
-  #include "AesManager.h" 
+  #include "AesManager.h"
   #endif /* CPU_QN908X */
 #endif /* FSL_FEATURE_SOC_AES_HW */
 
@@ -112,13 +121,22 @@
     #define SecLib_AllowToSleep()
 #endif
 
-/* Need to lockout access to the AES HW accelerator in multitask environments */ 
+/* Need to lockout access to the AES HW accelerator in multitask environments */
 #if USE_RTOS && (LTC_HW_ACC || MMCAU_HW_ACC || JN_AES_HW_ACC || FSL_FEATURE_SOC_AES_HW) && gSecLibUseMutex_c
-    #define SECLIB_MUTEX_LOCK()   OSA_MutexLock(mSecLibMutexId, osaWaitForever_c)
-    #define SECLIB_MUTEX_UNLOCK() OSA_MutexUnlock(mSecLibMutexId)
+    #define SECLIB_AES_MUTEX_LOCK()   OSA_MutexLock(mSecLibAesMutexId, osaWaitForever_c)
+    #define SECLIB_AES_MUTEX_UNLOCK() OSA_MutexUnlock(mSecLibAesMutexId)
 #else
-    #define SECLIB_MUTEX_LOCK()
-    #define SECLIB_MUTEX_UNLOCK()
+    #define SECLIB_AES_MUTEX_LOCK()
+    #define SECLIB_AES_MUTEX_UNLOCK()
+#endif /* USE_RTOS */
+
+/* Need to lockout access to the SHA HW accelerator in multitask environments */
+#if USE_RTOS && JN_SHA_HW_ACC && gSecLibUseMutex_c
+    #define SECLIB_SHA_MUTEX_LOCK(timeout) OSA_MutexLock(mSecLibShaMutexId, timeout)
+    #define SECLIB_SHA_MUTEX_UNLOCK()      OSA_MutexUnlock(mSecLibShaMutexId)
+#else
+    #define SECLIB_SHA_MUTEX_LOCK(...) osaStatus_Success
+    #define SECLIB_SHA_MUTEX_UNLOCK()
 #endif /* USE_RTOS */
 
 #if (JN_AES_HW_ACC)
@@ -128,6 +146,19 @@
             NONCE[14] = 0;
 #define UPDATE_NONCE_COUNTER(NONCE,VALUE); \
             NONCE[15] = Lo8(VALUE);
+#endif
+
+
+#ifdef EC_P256_LEGACY
+#define mUseBigIntMacros_d 0
+#define mUseImprovedDoubleAndAdd_d 0
+
+#define SIZE        (8 * sizeof(uint32_t))
+#define LOW_MASK    ((((uint32_t)1)<<(SIZE/2))-1)
+#define HIGH_HALF   (SIZE/2)
+
+#define KEY_UINT8_ARRAY_LENGTH  ECP256_COORDINATE_LEN
+#define KEY_UINT32_ARRAY_LENGTH ECP256_COORDINATE_WLEN
 #endif
 /*! *********************************************************************************
 *************************************************************************************
@@ -163,16 +194,18 @@ mmcauAesContext_t mmcauAesCtx;
 
 #if USE_RTOS && (JN_AES_HW_ACC || LTC_HW_ACC || MMCAU_HW_ACC || FSL_FEATURE_SOC_AES_HW)
 /*! Mutex used to protect the AES Context when an RTOS is used. */
-osaMutexId_t mSecLibMutexId = NULL;
+osaMutexId_t mSecLibAesMutexId = NULL;
+#endif /* USE_RTOS */
+
+#if USE_RTOS && JN_SHA_HW_ACC
+/*! Mutex used to protect the SHA Context when an RTOS is used. */
+osaMutexId_t mSecLibShaMutexId = NULL;
 #endif /* USE_RTOS */
 
 #if JN_SHA_HW_ACC
 typedef struct sha1Context_tag{
     uint32_t sha_working_area[SHA_CTX_SIZE];
 }sha1Context_t;
-typedef struct sha256Context_tag{
-    uint32_t sha_working_area[SHA_CTX_SIZE];
-}sha256Context_t;
 #else
 typedef struct sha1Context_tag{
     uint32_t hash[SHA1_HASH_SIZE/sizeof(uint32_t)];
@@ -180,32 +213,40 @@ typedef struct sha1Context_tag{
     uint32_t totalBytes;
     uint8_t  bytes;
 }sha1Context_t;
+#endif
+
 typedef struct sha256Context_tag{
     uint32_t hash[SHA256_HASH_SIZE/sizeof(uint32_t)];
     uint8_t  buffer[SHA256_BLOCK_SIZE];
     uint32_t totalBytes;
     uint8_t  bytes;
 }sha256Context_t;
-#endif
-
-
 
 typedef struct HMAC_SHA256_context_tag{
     sha256Context_t shaCtx;
     uint8_t pad[SHA256_BLOCK_SIZE];
-}HMAC_SHA256_context_t;
+} HMAC_SHA256_context_t;
 
+typedef int (*efuse_LoadUniqueKey_t)(void);
+typedef uint32_t (*aesLoadKeyFromOTP_t)(AES_KEY_SIZE_T keySize);
+
+/* This structure can be used to define local software contexts for AES usage.
+ * It will eventually be passed to AES_128_ProcessBlocks, to set the AES mode
+ * and to load the correct key (Efuse OTP or software key). If pSoftwareKey
+ * is NULL, secret key shall be loaded through ROM API. */
+typedef struct {
+    uint32_t mode;          /*!< Setup mode: ECB, etc. */
+    uint32_t keySize;       /*!< Size of the AES key. */
+    uint32_t* pSoftwareKey; /*!< Address to save the software key. */
+    uint32_t flags;         /*!< Extra flags, normally 0. */
+} aesContext_t;
 
 /************************************************************************************
 *************************************************************************************
 * Private memory declarations
 *************************************************************************************
 ************************************************************************************/
-extern const uint32_t gEcP256_MultiplicationBufferSize_c;
 
-/*! Callback used to offload Security steps onto application message queue. When it is not set the
- * multiplication is done using SecLib means */
-secLibCallback_t pfSecLibMultCallback = NULL;
 
 #if (JN_AES_HW_ACC)
 /* Used by ZigBee stack adaptation */
@@ -221,13 +262,27 @@ static tsReg128 sKey;
 bool_t g_bLegacyHwBugEmulation;
 
 /*
-* Although an AES HW accelerator is present, it does not work correctly when simultaneous 
+* Although an AES HW accelerator is present, it does not work correctly when simultaneous
 * DMA operation happens on the same AHB port.
-* A workaround consists in preventing HW AES engine operation when DM is ongoing.   
+* A workaround consists in preventing HW AES engine operation when DM is ongoing.
 */
 uint8_t force_sw_aes_execution_cnt = 0;
 
 #endif
+
+/* Pointer to the software context which currently uses hardware SHA256.*/
+static void* sHwSha256Context = NULL;
+
+/* Flag to signal an ISR used hardware AES for encrypt/decrypt. */
+static volatile bool_t bHasIsrInterrupted = false;
+
+/* AES_128_ProcessBlocks can use efuseLoadUniqueKey and aesLoadKeyFromOTP to load
+ * the secret key in hardware AES module. */
+static const efuse_LoadUniqueKey_t efuseLoadUniqueKey = (efuse_LoadUniqueKey_t)(0x030016f4 | 1);
+static const aesLoadKeyFromOTP_t aesLoadKeyFromOTP = (aesLoadKeyFromOTP_t)(0x0300146d | 1);
+
+static uint32_t u32Reverse(uint32_t u32InWord);
+
 /*! *********************************************************************************
 *************************************************************************************
 * Public prototypes
@@ -256,56 +311,9 @@ void sw_sha256_hash_n (const uint8_t *msg_data, int32_t num_blks, uint32_t *sha2
 void sw_sha256_hash   (const uint8_t *msg_data, uint32_t *sha256_state);
 void sw_sha256_update (const uint8_t *msg_data, int32_t num_blks, uint32_t *sha256_state);
 
-ecdhStatus_t Ecdh_GenerateNewKeys
-(
-    ecdhPublicKey_t*    pOutPublicKey,
-    ecdhPrivateKey_t*   pOutPrivateKey,
-    void*               pMultiplicationBuffer
-);
 
-ecdhStatus_t Ecdh_GenerateNewKeysSeg
-(
-    computeDhKeyParam_t*        pDhKeyData
-);
 
-ecdhStatus_t Ecdh_ComputeDhKey
-(
-    ecdhPrivateKey_t*   pPrivateKey,
-    ecdhPublicKey_t*    pPeerPublicKey,
-    ecdhDhKey_t*        pOutDhKey,
-    void*               pMultiplicationBuffer
-);
 
-ecdhStatus_t Ecdh_ComputeDhKeySeg
-(
-    computeDhKeyParam_t*        pDhKeyData
-);
-
-/************************************************************************************
-* \brief This function is used to compute the one intermediate step in a Jacobi
-*        multiplication. It functions the same as \ref EcP256_PointMult function.
-*
-* \param[in]  pData Pointer to the structure holding information about the
-*                   multiplication
-************************************************************************************/
-void Ecdh_ComputeJacobiChunk
-(
-    int32_t index,
-    int32_t stepSize,
-    computeDhKeyParam_t *pData
-);
-
-/************************************************************************************
-* \brief This function is used to compute the last step in a Jacobi multiplication.
-*        It functions the same as the last part of \ref EcP256_PointMult function.
-*
-* \param[in]  pData Pointer to the structure holding information about the
-*                   multiplication
-************************************************************************************/
-void Ecdh_JacobiCompleteMult
-(
-    computeDhKeyParam_t *pData
-);
 
 /*! *********************************************************************************
 *************************************************************************************
@@ -314,8 +322,9 @@ void Ecdh_JacobiCompleteMult
 ********************************************************************************** */
 #if !(JN_SHA_HW_ACC)
 static void SHA1_hash_n(const uint8_t* pData, uint32_t nBlk, uint32_t* pHash);
-static void SHA256_hash_n(const uint8_t* pData, uint32_t nBlk, uint32_t* pHash);
 #endif
+static void SHA256_hash_n(const uint8_t* pData, uint32_t nBlk, uint32_t* pHash);
+
 static void AES_128_CMAC_Generate_Subkey(const uint8_t *key, uint8_t *K1, uint8_t *K2);
 static void SecLib_LeftShiftOneBit(uint8_t *input, uint8_t *output);
 static void SecLib_Padding(const uint8_t *lastb, uint8_t *pad, uint32_t length);
@@ -358,15 +367,27 @@ void SecLib_Init(void)
 #elif JN_AES_HW_ACC
     AES_Init(AES0);
 #endif
-    
+
 #if USE_RTOS && (LTC_HW_ACC || MMCAU_HW_ACC || JN_AES_HW_ACC || FSL_FEATURE_SOC_AES_HW)
     /*! Initialize the MMCAU AES Context Buffer Mutex here. */
     /* Do not allocate heap memory again after getting out of low power
        and reinitializing SecLib if RAM retention is on*/
-    if (mSecLibMutexId == NULL)
+    if (mSecLibAesMutexId == NULL)
     {
-        mSecLibMutexId = OSA_MutexCreate();
-        if (mSecLibMutexId == NULL)
+        mSecLibAesMutexId = OSA_MutexCreate();
+        if (mSecLibAesMutexId == NULL)
+        {
+            panic( ID_PANIC(0,0), (uint32_t)SecLib_Init, 0, 0 );
+            return;
+        }
+    }
+#endif
+
+#if USE_RTOS && JN_SHA_HW_ACC
+    if (mSecLibShaMutexId == NULL)
+    {
+        mSecLibShaMutexId = OSA_MutexCreate();
+        if (mSecLibShaMutexId == NULL)
         {
             panic( ID_PANIC(0,0), (uint32_t)SecLib_Init, 0, 0 );
             return;
@@ -399,75 +420,242 @@ bool_t  SecLib_AES_Is_HW_Accelerator_disabled(void)
 }
 #endif
 
-static void hw_aes_encrypt(const uint8_t *pInput, const size_t inputLen, const uint8_t *pKey, uint8_t * pOutput)
+/*! *********************************************************************************
+* \brief  Set AES Key in AES HW Accelerator.
+*
+* \param[in]  pKey May be NULL if 128 bit EFUSE Key is to be used,
+*             otherwise pointer on Key byte array
+* \param[in]  keyBitSize : Key size in bits must be 128 for EFUSE key.
+*
+* \pre All Input/Output pointers must refer to a memory address alligned to 4 bytes!
+*
+********************************************************************************** */
+static status_t hw_aes_load_key(const uint8_t* pKey, size_t keyBitSize)
 {
-    SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
-    /* If key is already set in may be omitted and parameter is left NULL */
+    status_t st;
+    size_t keySize = (keyBitSize >> 3); /* Byte size */
     if (pKey != NULL)
     {
-        AES_SetKey(AES0, pKey, 128/8);
-    }
-    AES_EncryptEcb(AES0, pInput, pOutput, inputLen);
-    SECLIB_MUTEX_UNLOCK();
-    SecLib_AllowToSleep();
-}
-
-
-static void hw_aes_decrypt(const uint8_t *pInput, const size_t inputLen, const uint8_t *pKey, uint8_t * pOutput)
-{
-    SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
-    /* If key is already set in may be omitted and parameter is left NULL */
-    if (pKey != NULL)
-    {
-        AES_SetKey(AES0, pKey, 128/8);
-    }
-    AES_DecryptEcb(AES0, pInput, pOutput, inputLen);
-    SECLIB_MUTEX_UNLOCK();
-    SecLib_AllowToSleep();
-}
-
-static void k32w0_aes_block_decrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput)
-{
-#if (gSecLibAESMethodSelectionDynHwSw_c > 0)
-    if (!SecLib_AES_Is_HW_Accelerator_disabled())
-    {
-        hw_aes_decrypt(pInput, AES_BLOCK_SIZE, pKey, pOutput);
+        /* kStatus_InvalidArgument may be returned if keySize is not 16, 24 or 32 */
+        st = AES_SetKey(AES0, pKey, keySize);
     }
     else
     {
+        if (keySize == 16u) /* AES 128 we use the EFUSEd Key */
+        {
+            efuseLoadUniqueKey();
+            aesLoadKeyFromOTP(AES_KEY_128BITS);
+            st = kStatus_Success;
+        }
+        else
+        {
+            st = kStatus_InvalidArgument;
+        }
+    }
+    return st;
+}
+/*! *********************************************************************************
+* \brief  Launch HW AES ECB encryption operation 
+*
+* \param[in]  pInput Pointer on input plaintext 
+* \param[in]  inputLen Length of input plaintext in number of bytes 
+* \param[in]  pKey pointer on key - Length of key is implicitly 128 bit
+*             may be NULL if emaning to use EFUSE secret key
+* \param[out] pointer on output ciphertext buffer.
+* 
+*
+********************************************************************************** */
+static status_t hw_aes_encrypt(const uint8_t *pInput, const size_t inputLen, const uint8_t *pKey, uint8_t * pOutput)
+{
+    status_t st;
+
+    do {
+        if (OSA_InIsrContext())
+        {
+            st = hw_aes_load_key(pKey, 128u);
+            if (st != kStatus_Success)
+            {
+                break;
+            }
+            st = AES_EncryptEcb(AES0, pInput, pOutput, AES_BLOCK_SIZE);
+            if (st != kStatus_Success)
+            {
+                break;
+            }
+            bHasIsrInterrupted = true;
+        }
+        else
+        {
+            do
+            {
+                SECLIB_AES_MUTEX_LOCK();
+                bHasIsrInterrupted = false;
+                st = hw_aes_load_key(pKey, 128u);
+                if (st != kStatus_Success)
+                {
+                    break;
+                }
+                st = AES_EncryptEcb(AES0, pInput, pOutput, AES_BLOCK_SIZE);
+                if (st != kStatus_Success)
+                {
+                    break;
+                }
+                SECLIB_AES_MUTEX_UNLOCK();
+            } while (bHasIsrInterrupted);
+        }
+    } while(false);
+    return st;
+}
+
+
+/*! *********************************************************************************
+* \brief  Launch HW AES ECB decryption operation 
+*
+* \param[in]  pInput Pointer on input ciphertext octet string
+* \param[in]  inputLen Length of input ciphertext in number of bytes 
+* \param[in]  pKey pointer on key - Length of key is implicitly 128 bit
+*             may be NULL if emaning to use EFUSE secret key
+* \param[out] pointer on output plaintext buffer.
+* 
+*
+********************************************************************************** */
+static status_t hw_aes_decrypt(const uint8_t *pInput, const size_t inputLen, const uint8_t *pKey, uint8_t * pOutput)
+{
+    status_t st;
+
+    do {
+      if (OSA_InIsrContext())
+      {
+          st = hw_aes_load_key(pKey, 128u);
+          if (st != kStatus_Success)
+          {
+              break;
+          }
+          st = AES_DecryptEcb(AES0, pInput, pOutput, AES_BLOCK_SIZE);
+          if (st != kStatus_Success)
+          {
+              break;
+          }
+          bHasIsrInterrupted = true;
+      }
+      else
+      {
+        do
+        {
+            SECLIB_AES_MUTEX_LOCK();
+            bHasIsrInterrupted = false;
+            st = hw_aes_load_key(pKey, 128u);
+            if (st != kStatus_Success)
+            {
+                break;
+            }
+            st = AES_DecryptEcb(AES0, pInput, pOutput, AES_BLOCK_SIZE);
+            if (st != kStatus_Success)
+            {
+                break;
+            }
+            SECLIB_AES_MUTEX_UNLOCK();
+        } while (bHasIsrInterrupted);
+      }
+    } while(false);
+    return st;
+}
+
+static status_t k32w0_aes_block_decrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput)
+{
+    status_t st = kStatus_Success;
+    do {
+#if (gSecLibAESMethodSelectionDynHwSw_c > 0)
+        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        {
+            st = hw_aes_decrypt(pInput, AES_BLOCK_SIZE, pKey, pOutput);
+            break;
+        }
+        if (pKey == NULL)
+        {
+            st = kStatus_InvalidArgument;
+            break;
+        }
         sw_Aes128((uint8_t*)pInput, (uint8_t*)pKey, 0, pOutput);
-    }
+        st = kStatus_Success;
 #else
-    hw_aes_decrypt(pInput, AES_BLOCK_SIZE, pKey, pOutput);
+        st = hw_aes_decrypt(pInput, AES_BLOCK_SIZE, pKey, pOutput);
 #endif
+    } while (false);
+    return st;
 }
 
-void k32w0_aes_block_encrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput)
+status_t  k32w0_aes_block_encrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput)
 {
+    status_t st = kStatus_Success;
+    do {
 #if (gSecLibAESMethodSelectionDynHwSw_c > 0)
-    if (!SecLib_AES_Is_HW_Accelerator_disabled())
-    {
-        hw_aes_encrypt(pInput, AES_BLOCK_SIZE, pKey, pOutput);
-    }
-    else
-    {
+        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        {
+            st = hw_aes_encrypt(pInput, AES_BLOCK_SIZE, pKey, pOutput);
+            break;
+        }
+        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */        if (pKey == NULL)
+        {
+            st = kStatus_InvalidArgument;
+            break;
+        }
         sw_Aes128((uint8_t*)pInput, (uint8_t*)pKey, 1, pOutput);
-    }
+        st = kStatus_Success;
 #else
-    hw_aes_encrypt(pInput, AES_BLOCK_SIZE, pKey, pOutput);
+        st = hw_aes_encrypt(pInput, AES_BLOCK_SIZE, pKey, pOutput);
 #endif
+    } while (false);
+    return st;
+
 }
 
+/*! *********************************************************************************
+* \brief  Process current AES operation described by the context.
+*         It wraps ROM API and offers mutex protection and protection
+*         against ISR interruption.
+*
+* \param[in]  pBlockIn Pointer to the location of the input (plaintext/ciphertext).
+*
+* \param[in]  pBlockOut Pointer to the location of the output (plaintext/ciphertext).
+*
+* \param[in]  numBlocks Number of 16 bytes blocks to be processed.
+*
+********************************************************************************** */
+uint32_t AES_128_ProcessBlocks(const void* pContext,
+                               uint32_t* pBlockIn,
+                               uint32_t* pBlockOut,
+                               uint32_t  numBlocks)
+{
+    ErrorCode_t status = 0;
+    const aesContext_t* context = (const aesContext_t*)pContext;
+    do
+    {
+        SECLIB_AES_MUTEX_LOCK();
+        bHasIsrInterrupted = false;
+        if (context->pSoftwareKey)
+        {
+            status = aesLoadKeyFromSW((AES_KEY_SIZE_T)context->keySize, context->pSoftwareKey);
+        }
+        else
+        {
+            efuseLoadUniqueKey();
+            aesLoadKeyFromOTP((AES_KEY_SIZE_T)context->keySize);
+        }
+        status = aesMode((AES_MODE_T)context->mode, context->flags);
+        status = aesProcess(pBlockIn, pBlockOut, numBlocks);
+        SECLIB_AES_MUTEX_UNLOCK();
+    } while (bHasIsrInterrupted);
 
+    return (uint32_t)status;
+}
 
 /*! *********************************************************************************
 * \brief  This function performs AES-128 encryption on a 16-byte block.
 *
 * \param[in]  pInput Pointer to the location of the 16-byte plain text block.
 *
-* \param[in]  pKey Pointer to the location of the 128-bit key. 
+* \param[in]  pKey Pointer to the location of the 128-bit key.
 *             If NULL the key is already programmed.
 *
 * \param[out]  pOutput Pointer to the location to store the 16-byte ciphered output.
@@ -482,7 +670,7 @@ void AES_128_Encrypt(const uint8_t* pInput,
 
 #if !JN_AES_HW_ACC
     SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
+    SECLIB_AES_MUTEX_LOCK();
 #endif
 
 #if MMCAU_HW_ACC
@@ -552,8 +740,8 @@ void AES_128_Encrypt(const uint8_t* pInput,
     sw_Aes128(pInput, pKey, 1, pOutput);
 #endif
 
- #if !JN_AES_HW_ACC    
-    SECLIB_MUTEX_UNLOCK();
+ #if !JN_AES_HW_ACC
+    SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
 #endif
 }
@@ -579,7 +767,7 @@ void AES_128_Decrypt(const uint8_t* pInput,
 {
 #if !JN_AES_HW_ACC
     SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
+    SECLIB_AES_MUTEX_LOCK();
 #endif
 
 #if MMCAU_HW_ACC
@@ -587,7 +775,7 @@ void AES_128_Decrypt(const uint8_t* pInput,
     uint8_t* pIn;
     uint8_t* pOut;
     /* Check if pKey is 4 bytes aligned */
-    if ((uint32_t)pKey & 0x00000003) 
+    if ((uint32_t)pKey & 0x00000003)
     {
         FLib_MemCpy( pCtx->alignedIn, (uint8_t*)pKey, AES_BLOCK_SIZE);
         pIn = pCtx->alignedIn;
@@ -597,11 +785,11 @@ void AES_128_Decrypt(const uint8_t* pInput,
         pIn = (uint8_t*)pKey;
     }
 
-    /* Expand Key */  
+    /* Expand Key */
     mmcau_aes_set_key(pIn, AES128, pCtx->keyExpansion);
 
     /* Check if pData is 4 bytes aligned */
-    if ((uint32_t)pInput & 0x00000003) 
+    if ((uint32_t)pInput & 0x00000003)
     {
         FLib_MemCpy( pCtx->alignedIn, (uint8_t*)pInput, AES_BLOCK_SIZE);
         pIn = pCtx->alignedIn;
@@ -639,17 +827,17 @@ void AES_128_Decrypt(const uint8_t* pInput,
         {
             OSA_TaskYield();
         }
-        __disable_irq();        
+        __disable_irq();
         hw_ase_status_flag = AES_128_Decrypt_HW(pInput, pKey, pOutput);
         __enable_irq();
     } while(hw_ase_status_flag == HW_AES_Previous_Enc_on_going);
 #elif JN_AES_HW_ACC
     k32w0_aes_block_decrypt(pInput, pKey, pOutput);
-#else 
+#else
     sw_Aes128(pInput, pKey, 0, pOutput);
 #endif
 #if !JN_AES_HW_ACC
-    SECLIB_MUTEX_UNLOCK();
+    SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
 #endif
 }
@@ -663,13 +851,13 @@ static void sw_aes_encrypt(const uint8_t*  pInput, uint32_t inputLen, const uint
     /* If remaining data bigger than one AES block size */
     while( inputLen > AES_BLOCK_SIZE )
     {
-        sw_Aes128(pInput, pKey, 1, pOutput); 
+        sw_Aes128(pInput, pKey, 1, pOutput);
         pInput += AES_BLOCK_SIZE;
         pOutput += AES_BLOCK_SIZE;
         inputLen -= AES_BLOCK_SIZE;
     }
-    /* Only do if there is remaining data: since we have consumed the whole AES blocks already 
-     * the remainder is smaller then one AES block size */ 
+    /* Only do if there is remaining data: since we have consumed the whole AES blocks already
+     * the remainder is smaller then one AES block size */
     if (inputLen > 0)
     {
         uint8_t tempBuffIn[AES_BLOCK_SIZE] = {0};
@@ -682,22 +870,28 @@ static void sw_aes_encrypt(const uint8_t*  pInput, uint32_t inputLen, const uint
 
 #endif
 
-static void k32w0_aes_encrypt(const uint8_t*  pInput, uint32_t inputLen, const uint8_t* pKey, uint8_t* pOutput)
+static status_t k32w0_aes_encrypt(const uint8_t*  pInput, uint32_t inputLen, const uint8_t* pKey, uint8_t* pOutput)
 {
+    status_t st;
+    do {
 #if (gSecLibAESMethodSelectionDynHwSw_c > 0)
-
-    if (!SecLib_AES_Is_HW_Accelerator_disabled())
-    {
-        hw_aes_encrypt(pInput, inputLen, pKey, pOutput);
-    }
-    else
-    {
+        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        {
+            st = hw_aes_encrypt(pInput, inputLen, pKey, pOutput);
+            break;
+        }
+        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */        if (pKey == NULL)
+        {
+            st = kStatus_InvalidArgument;
+            break;
+        }
         sw_aes_encrypt(pInput, inputLen, pKey, pOutput);
-    }
+        st = kStatus_Success;
 #else // (gAESMethodSelection == gAESMethodSelectionHw)
-    hw_aes_encrypt(pInput, inputLen, pKey, pOutput);
+        st = hw_aes_encrypt(pInput, inputLen, pKey, pOutput);
 #endif
-
+    } while (false);
+    return st;
 }
 
 
@@ -734,8 +928,8 @@ void AES_128_ECB_Encrypt(const uint8_t* pInput,
     pAES.pPlain = pInput;
     pAES.Blocks = 0;
   #if USE_TASK_FOR_HW_AES
-    AESM_InitType( &AES128ECB_Enc_Id, gAESMGR_ECB_Enc_c );  
-    AESM_SetParam( AES128ECB_Enc_Id, pAES, AES_128_ECB_Enc_HW); 
+    AESM_InitType( &AES128ECB_Enc_Id, gAESMGR_ECB_Enc_c );
+    AESM_SetParam( AES128ECB_Enc_Id, pAES, AES_128_ECB_Enc_HW);
     AESM_Start(AES128ECB_Enc_Id);
   #else
     AES_128_ECB_Enc_HW(&pAES);
@@ -744,6 +938,7 @@ void AES_128_ECB_Encrypt(const uint8_t* pInput,
     sw_aes_encrypt(pInput, inputLen, pKey, pOutput);
 #endif
 }
+
 /*! *********************************************************************************
 * \brief  This function performs AES-128-ECB encryption on a message block.
 *
@@ -778,7 +973,7 @@ void AES_128_ECB_Block_Encrypt(uint8_t* pInput,
     AESM_SetParam( AES128ECBB_Enc_Id, pAES, AES_128_ECB_Block_Enc_HW);
     AESM_Start(AES128ECBB_Enc_Id);
   #else
-    AES_128_ECB_Block_Enc_HW(&pAES);    
+    AES_128_ECB_Block_Enc_HW(&pAES);
   #endif /* USE_TASK_FOR_HW_AES */
 #else /* SW AES */
     while( numBlocks )
@@ -825,38 +1020,52 @@ static void sw_aes_cbc_encrypt(const uint8_t* pInput,
 }
 #endif
 
-static void hw_aes_cbc_encrypt(const uint8_t* pInput,
+static status_t hw_aes_cbc_encrypt(const uint8_t* pInput,
                               const uint32_t inputLen,
                               const uint8_t* pInitVector,
                               const uint8_t* pKey,
                               uint8_t* pOutput)
 {
+    status_t st;
     SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
-    AES_SetKey(AES0, pKey, 128/8);
-    AES_EncryptCbc(AES0, pInput, pOutput, inputLen, pInitVector);
-    SECLIB_MUTEX_UNLOCK();
+    SECLIB_AES_MUTEX_LOCK();
+    do {
+        st = hw_aes_load_key(pKey, 128u);
+        if (st != kStatus_Success)
+            break;
+        st = AES_EncryptCbc(AES0, pInput, pOutput, inputLen, pInitVector);
+    } while (false);
+    SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
+    return st;
 }
 
-static void k32w0_aes_cbc_encrypt(const uint8_t* pInput,
+static status_t k32w0_aes_cbc_encrypt(const uint8_t* pInput,
                            uint32_t inputLen,
                            const uint8_t* pInitVector,
                            const uint8_t* pKey,
                            uint8_t* pOutput)
 {
+    status_t st;
+    do {
 #if (gSecLibAESMethodSelectionDynHwSw_c > 0)
-    if (!SecLib_AES_Is_HW_Accelerator_disabled())
-    {
-        hw_aes_cbc_encrypt(pInput, inputLen, pInitVector, pKey, pOutput);
-    }
-    else
-    {
+        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        {
+            st = hw_aes_cbc_encrypt(pInput, inputLen, pInitVector, pKey, pOutput);
+            break;
+        }
+        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */        if (pKey == NULL)
+        {
+            st = kStatus_InvalidArgument;
+            break;
+        }
         sw_aes_cbc_encrypt(pInput, inputLen, pInitVector, pKey, pOutput);
-    }
+        st = kStatus_Success;
 #else
-    hw_aes_cbc_encrypt(pInput, inputLen, pInitVector, pKey, pOutput);
+        st = hw_aes_cbc_encrypt(pInput, inputLen, pInitVector, pKey, pOutput);
 #endif
+    } while (false);
+    return st;
 
 }
 /*! *********************************************************************************
@@ -886,9 +1095,9 @@ void AES_128_CBC_Encrypt(const uint8_t* pInput,
 {
 #if LTC_HW_ACC
     SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
+    SECLIB_AES_MUTEX_LOCK();
     LTC_AES_EncryptCbc(LTC0, pInput, pOutput, inputLen, pInitVector, pKey, AES_BLOCK_SIZE);
-    SECLIB_MUTEX_UNLOCK();
+    SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
 
 #elif JN_AES_HW_ACC
@@ -910,7 +1119,7 @@ void AES_128_CBC_Encrypt(const uint8_t* pInput,
 *
 * \param[in]  pInput Pointer to the location of the input message.
 *
-* \param[in]  inputLen Input message length in bytes. 
+* \param[in]  inputLen Input message length in bytes.
 *
 *             IMPORTANT: User must make sure that input and output
 *             buffers have at least inputLen + 16 bytes size
@@ -946,9 +1155,9 @@ uint32_t AES_128_CBC_Encrypt_And_Pad(uint8_t* pInput,
     /* CBC-Encrypt */
 #if LTC_HW_ACC
     SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
+    SECLIB_AES_MUTEX_LOCK();
     LTC_AES_EncryptCbc(LTC0, pInput, pOutput, newLen, pInitVector, pKey, AES_BLOCK_SIZE);
-    SECLIB_MUTEX_UNLOCK();
+    SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
 #elif JN_AES_HW_ACC
     k32w0_aes_cbc_encrypt(pInput, newLen, pInitVector, pKey, pOutput);
@@ -978,13 +1187,13 @@ static void sw_aes_cbc_decrypt(const uint8_t* pInput,
     while( inputLen > 0 )
     {
         AES_128_Decrypt(pInput, pKey, pOutput);
-        
+
         SecLib_XorN(pOutput, temp, AES_BLOCK_SIZE);
-        
+
         pInput += AES_BLOCK_SIZE;
         pOutput += AES_BLOCK_SIZE;
         inputLen -= AES_BLOCK_SIZE;
-        
+
         FLib_MemCpy(temp, temp + AES_BLOCK_SIZE, AES_BLOCK_SIZE);
         if(inputLen > 0)
         {
@@ -993,39 +1202,56 @@ static void sw_aes_cbc_decrypt(const uint8_t* pInput,
     }
 }
 #endif
-static void hw_aes_cbc_decrypt(const uint8_t* pInput,
+static status_t hw_aes_cbc_decrypt(const uint8_t* pInput,
                         uint32_t inputLen,
                         const uint8_t* pInitVector,
                         const uint8_t* pKey,
                         uint8_t* pOutput)
 {
+    status_t st;
+
     SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
-    AES_SetKey(AES0, pKey, 128/8);
-    AES_DecryptCbc(AES0, pInput, pOutput, inputLen, pInitVector);
-    SECLIB_MUTEX_UNLOCK();
+    SECLIB_AES_MUTEX_LOCK();
+    do {
+        st = hw_aes_load_key(pKey, 128u);
+        if (st != kStatus_Success)
+            break;
+        st = AES_DecryptCbc(AES0, pInput, pOutput, inputLen, pInitVector);
+        if (st != kStatus_Success)
+            break;
+    } while (false);
+    SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
+    return st;
 }
 
-static void k32w0_aes_cbc_decrypt(const uint8_t* pInput,
+static status_t k32w0_aes_cbc_decrypt(const uint8_t* pInput,
                            uint32_t inputLen,
                            const uint8_t* pInitVector,
                            const uint8_t* pKey,
                            uint8_t* pOutput)
 {
+    status_t st;
+    do {
 #if (gSecLibAESMethodSelectionDynHwSw_c > 0)
-    if (!SecLib_AES_Is_HW_Accelerator_disabled())
-    {
-        hw_aes_cbc_decrypt(pInput, inputLen, pInitVector, pKey, pOutput);
-    }
-    else
-    {
+        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        {
+            st = hw_aes_cbc_decrypt(pInput, inputLen, pInitVector, pKey, pOutput);
+            break;
+        }
+        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */
+        if (pKey == NULL)
+        {
+            st = kStatus_InvalidArgument;
+            break;
+        }
         sw_aes_cbc_decrypt(pInput, inputLen, pInitVector, pKey, pOutput);
-    }
+        st = kStatus_Success;
 #else
-    hw_aes_cbc_decrypt(pInput, inputLen, pInitVector, pKey, pOutput);
+        st = hw_aes_cbc_decrypt(pInput, inputLen, pInitVector, pKey, pOutput);
 #endif
-
+    } while (false);
+    return st;
 }
 
 /*! *********************************************************************************
@@ -1058,9 +1284,9 @@ uint32_t AES_128_CBC_Decrypt_And_Depad(const uint8_t* pInput,
     }
 #if LTC_HW_ACC
     SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
+    SECLIB_AES_MUTEX_LOCK();
     LTC_AES_DecryptCbc(LTC0, pInput, pOutput, inputLen, pInitVector, pKey, AES_BLOCK_SIZE, kLTC_DecryptKey);
-    SECLIB_MUTEX_UNLOCK();
+    SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
 
 #elif JN_AES_HW_ACC
@@ -1105,38 +1331,57 @@ static void sw_aes_ctr( const uint8_t* pInput,
 }
 #endif
 
-static void hw_aes_ctr_crypt(const uint8_t* pInput,
+
+
+static status_t hw_aes_ctr_crypt(const uint8_t* pInput,
                      const uint32_t inputLen,
                      uint8_t* pCounter,
                      const uint8_t* pKey,
                      uint8_t* pOutput)
 {
+    status_t st;
     SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
-    AES_SetKey(AES0, pKey, 128/8);
-    AES_CryptCtr(AES0, pInput, pOutput, inputLen, pCounter, NULL, NULL);
-    SECLIB_MUTEX_UNLOCK();
+    SECLIB_AES_MUTEX_LOCK();
+    do {
+        st = hw_aes_load_key(pKey, 128u);
+        if (st != kStatus_Success)
+            break;
+        st = AES_CryptCtr(AES0, pInput, pOutput, inputLen, pCounter, NULL, NULL);
+        if (st != kStatus_Success)
+            break;
+    } while (false);
+    SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
+    return st;
 }
 
-static void k32w0_aes_ctr_crypt(const uint8_t* pInput,
+static status_t k32w0_aes_ctr_crypt(const uint8_t* pInput,
                            const uint32_t inputLen,
                            uint8_t* pCounter,
                            const uint8_t* pKey,
                            uint8_t* pOutput)
 {
+    status_t st;
+    do {
 #if  (gSecLibAESMethodSelectionDynHwSw_c > 0)
-    if (!SecLib_AES_Is_HW_Accelerator_disabled())
-    {
-        hw_aes_ctr_crypt(pInput, inputLen, pCounter, pKey, pOutput);
-    }
-    else
-    {
+        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        {
+            st = hw_aes_ctr_crypt(pInput, inputLen, pCounter, pKey, pOutput);
+            break;
+        }
+        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */
+        if (pKey == NULL)
+        {
+            st = kStatus_InvalidArgument;
+            break;
+        }
         sw_aes_ctr(pInput, inputLen, pCounter, pKey, pOutput);
-    }
+        st = kStatus_Success;
 #else
-    hw_aes_ctr_crypt(pInput, inputLen, pCounter, pKey, pOutput);
+        st = hw_aes_ctr_crypt(pInput, inputLen, pCounter, pKey, pOutput);
 #endif
+    } while (false);
+    return st;
 }
 
 /*! *********************************************************************************
@@ -1178,9 +1423,9 @@ void AES_128_CTR(const uint8_t* pInput,
 
 #elif LTC_HW_ACC
     SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
+    SECLIB_AES_MUTEX_LOCK();
     LTC_AES_EncryptCtr(LTC0, pInput, pOutput, inputLen, pCounter, pKey, AES_BLOCK_SIZE, NULL, NULL);
-    SECLIB_MUTEX_UNLOCK();
+    SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
 
 #elif JN_AES_HW_ACC
@@ -1214,7 +1459,7 @@ void AES_128_CMAC(const  uint8_t* pInput,
 {
 #if FSL_FEATURE_SOC_AES_HW /* HW AES */
     AES_param_t pAES;
-    
+
     pAES.CTR_counter = NULL;
     pAES.Key = pKey;
     pAES.Len = inputLen;
@@ -1229,9 +1474,9 @@ void AES_128_CMAC(const  uint8_t* pInput,
   #else
     AES_128_CMAC_HW(&pAES);
   #endif /* USE_TASK_FOR_HW_AES */
-    
+
 #else /* SW AES */
-    
+
     uint8_t X[16];
     uint8_t Y[16];
     uint8_t M_last[16] = {0};
@@ -1248,29 +1493,29 @@ void AES_128_CMAC(const  uint8_t* pInput,
 
     n = (uint8_t) ((inputLen + AES_BLOCK_SIZE -1) / AES_BLOCK_SIZE); /* n is number of rounds */
 
-    if (n == 0) 
+    if (n == 0)
     {
         n = 1;
         flag = 0;
-    } 
-    else 
+    }
+    else
     {
-        if ((inputLen % AES_BLOCK_SIZE) == 0) 
+        if ((inputLen % AES_BLOCK_SIZE) == 0)
         { /* last block is a complete block */
             flag = 1;
-        } 
-        else 
+        }
+        else
         { /* last block is not complete block */
             flag = 0;
         }
     }
 
     /* Process the last block  - the last part the MSB first input data */
-    if (flag) 
+    if (flag)
     { /* last block is complete block */
         SecLib_Xor128(&pInput[16 * (n - 1)], K1, M_last);
-    } 
-    else 
+    }
+    else
     {
         SecLib_Padding(&pInput[AES_BLOCK_SIZE * (n - 1)], padded, inputLen % 16);
         SecLib_Xor128(padded, K2, M_last);
@@ -1281,7 +1526,7 @@ void AES_128_CMAC(const  uint8_t* pInput,
         X[i] = 0;
     }
 
-    for (i = 0; i < n - 1; i++) 
+    for (i = 0; i < n - 1; i++)
     {
         SecLib_Xor128(X, &pInput[AES_BLOCK_SIZE * i], Y); /* Y := Mi (+) X  */
         AES_128_Encrypt(Y, pKey, X); /* X := AES-128(KEY, Y) */
@@ -1290,7 +1535,7 @@ void AES_128_CMAC(const  uint8_t* pInput,
     SecLib_Xor128(X, M_last, Y);
     AES_128_Encrypt(Y, pKey, X);
 
-    for (i = 0; i < AES_BLOCK_SIZE; i++) 
+    for (i = 0; i < AES_BLOCK_SIZE; i++)
     {
         pOutput[i] = X[i];
     }
@@ -1301,7 +1546,7 @@ void AES_128_CMAC(const  uint8_t* pInput,
 /*! *********************************************************************************
 * \brief  This function performs AES-128-CMAC on a message block accepting input data
 *         which is in LSB first format and computing the authentication code starting fromt he end of the data.
-* 
+*
 * \param[in]  pInput Pointer to the location of the input message.
 *
 * \param[in]  inputLen Length of the input message in bytes. The input data must be provided LSB first.
@@ -1337,7 +1582,7 @@ void AES_128_CMAC_LsbFirstInput (const uint8_t* pInput,
     {
         n = 1;
         flag = 0;
-    } 
+    }
     else
     {
         if ((inputLen % AES_BLOCK_SIZE) == 0) /* last block is a complete block */
@@ -1345,18 +1590,18 @@ void AES_128_CMAC_LsbFirstInput (const uint8_t* pInput,
             flag = 1;
         }
         else /* last block is not complete block */
-        { 
+        {
             flag = 0;
         }
     }
-    
+
     /* Process the last block  - the first part the LSB first input data */
     if (flag)  /* last block is complete block */
     {
         FLib_MemCpyReverseOrder (reversedBlock, &pInput[0], AES_BLOCK_SIZE);
         SecLib_Xor128 (reversedBlock, K1, M_last);
-    } 
-    else 
+    }
+    else
     {
         FLib_MemCpyReverseOrder (reversedBlock, &pInput[0], inputLen % AES_BLOCK_SIZE);
         SecLib_Padding(reversedBlock, padded, inputLen % AES_BLOCK_SIZE);
@@ -1367,7 +1612,7 @@ void AES_128_CMAC_LsbFirstInput (const uint8_t* pInput,
     {
         X[i] = 0;
     }
-    
+
     for (i = 0; i < n - 1; i++)
     {
         FLib_MemCpyReverseOrder (reversedBlock, &pInput[inputLen - AES_BLOCK_SIZE * (i + 1)], AES_BLOCK_SIZE);
@@ -1387,7 +1632,7 @@ void AES_128_CMAC_LsbFirstInput (const uint8_t* pInput,
 /*! *********************************************************************************
 * \brief  This function performs AES 128 CMAC Pseudo-Random Function (AES-CMAC-PRF-128),
 *         according to rfc4615, on a message block.
-* 
+*
 * \details The AES-CMAC-PRF-128 algorithm behaves similar to teh AES CMAC 128 algorithm
 *          but removes 128 bit key size restriction.
 *
@@ -1403,7 +1648,7 @@ void AES_128_CMAC_LsbFirstInput (const uint8_t* pInput,
 *
 ********************************************************************************** */
 void AES_CMAC_PRF_128(uint8_t* pInput,
-                      uint32_t inputLen, 
+                      uint32_t inputLen,
                       uint8_t* pVarKey,
                       uint32_t varKeyLen,
                       uint8_t* pOutput)
@@ -1423,7 +1668,7 @@ void AES_CMAC_PRF_128(uint8_t* pInput,
             AES_128_CMAC(pVarKey, varKeyLen, K0, K);
             pCmacKey = K;
         }
-        
+
         /*! Perform the CMAC operation which generates the output using the local
         *  key pointer whcih will be set to the initial key or the generated one. */
         AES_128_CMAC(pInput, inputLen, pCmacKey, pOutput);
@@ -1496,29 +1741,29 @@ secResultType_t AES_128_EAX_Encrypt(uint8_t* pInput,
     else
     {
         FLib_MemSet(buf, 0, 15);
-        
+
         buf[15] = 0;
         FLib_MemCpy((buf + AES_BLOCK_SIZE), pNonce, nonceLen);
         AES_128_CMAC(buf, AES_BLOCK_SIZE + nonceLen, pKey, nonce_mac);
-        
+
         buf[15] = 1;
         FLib_MemCpy((buf + AES_BLOCK_SIZE), pHeader, headerLen);
         AES_128_CMAC(buf, AES_BLOCK_SIZE + headerLen, pKey, hdr_mac);
-        
+
         /* keep the original value of nonce_mac, because AES_128_CTR will increment it */
         FLib_MemCpy(tempBuff, nonce_mac, nonceLen);
-        
+
         AES_128_CTR(pInput, inputLen, tempBuff, pKey, pOutput);
-        
+
         buf[15] = 2;
         FLib_MemCpy((buf + AES_BLOCK_SIZE), pOutput, inputLen);
         AES_128_CMAC(buf, AES_BLOCK_SIZE + inputLen, pKey, data_mac);
-        
+
         for (i = 0; i < AES_BLOCK_SIZE; i++)
         {
             pTag[i] = nonce_mac[i] ^ data_mac[i] ^ hdr_mac[i];
         }
-        
+
         MEM_BufferFree(buf);
     }
 
@@ -1590,21 +1835,21 @@ secResultType_t AES_128_EAX_Decrypt(uint8_t* pInput,
     else
     {
         FLib_MemSet(buf, 0, AES_BLOCK_SIZE-1);
-        
+
         buf[15] = 0;
         FLib_MemCpy((buf + AES_BLOCK_SIZE), pNonce, nonceLen);
         AES_128_CMAC(buf, AES_BLOCK_SIZE + nonceLen, pKey, nonce_mac);
-        
+
         buf[15] = 1;
         FLib_MemCpy((buf + AES_BLOCK_SIZE), pHeader, headerLen);
         AES_128_CMAC(buf, AES_BLOCK_SIZE + headerLen, pKey, hdr_mac);
-        
+
         buf[15] = 2;
         FLib_MemCpy((buf + AES_BLOCK_SIZE), pInput, inputLen);
         AES_128_CMAC(buf, AES_BLOCK_SIZE + inputLen, pKey, data_mac);
-        
+
         MEM_BufferFree(buf);
-        
+
         for (i = 0; i < AES_BLOCK_SIZE; i++)
         {
             if (pTag[i] != (nonce_mac[i] ^ data_mac[i] ^ hdr_mac[i]))
@@ -1613,7 +1858,7 @@ secResultType_t AES_128_EAX_Decrypt(uint8_t* pInput,
                 break;
             }
         }
-        
+
         if( gSecSuccess_c == status )
         {
             AES_128_CTR(pInput, inputLen, nonce_mac, pKey, pOutput);
@@ -1630,7 +1875,7 @@ secResultType_t AES_128_EAX_Decrypt(uint8_t* pInput,
 *
 * \param[in]  inputLen     Length of the input plaintext in bytes when encrypting.
 *                          Length of the input cypertext without the MAC length when decrypting.
-* 
+*
 * \param[in]  pAuthData    Pointer to the additional authentication data.
 *
 * \param[in]  authDataLen  Length of additional authentication data.
@@ -1671,7 +1916,7 @@ uint8_t AES_128_CCM(uint8_t* pInput,
     uint8_t status;
 
     SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
+    SECLIB_AES_MUTEX_LOCK();
 
 #if LTC_HW_ACC
     if( flags & gSecLib_CCM_Decrypt_c )
@@ -1687,7 +1932,7 @@ uint8_t AES_128_CCM(uint8_t* pInput,
         status = sw_AES128_CCM(pInput, inputLen, pAuthData, authDataLen, pNonce, nonceSize, pKey, pOutput, pCbcMac, macSize, flags);
 #endif
 
-    SECLIB_MUTEX_UNLOCK();
+    SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
 
     return status;
@@ -1784,7 +2029,7 @@ static void AES_128_CMAC_Generate_Subkey(const uint8_t *key,
     uint8_t tmp[AES_BLOCK_SIZE] = {0};
     uint32_t i;
 
-    for ( i=0; i<AES_BLOCK_SIZE; i++ ) 
+    for ( i=0; i<AES_BLOCK_SIZE; i++ )
     {
         Z[i] = 0;
     }
@@ -1839,7 +2084,7 @@ static void SecLib_LeftShiftOneBit(uint8_t *input,
 }
 
 /*! *********************************************************************************
-* \brief  This function pads an incomplete 16 byte block of data, where padding is 
+* \brief  This function pads an incomplete 16 byte block of data, where padding is
 *         the concatenation of x and a single '1',
 *         followed by the minimum number of '0's, so that the total length is equal to 128 bits.
 *
@@ -1905,11 +2150,11 @@ static void SecLib_Xor128(const uint8_t *a,
 void* SHA1_AllocCtx (void)
 {
     void* sha1Ctx = MEM_BufferAlloc(sizeof(sha1Context_t));
-    
+
     return sha1Ctx;
 }
 
-                           
+
 /*! *********************************************************************************
 * \brief  This function deallocates the memory buffer for the SHA1 context structure
 *
@@ -1949,12 +2194,12 @@ void SHA1_Init (void* pContext)
     /* lock SHA HW resource and */
     /* prevent device to go to low power until SHA processing finished */
     SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
+    SECLIB_AES_MUTEX_LOCK();
     SHA_ClkInit(SHA0);
     SHA_Init(SHA0, pContext, kSHA_Sha1);
 #else
     sha1Context_t* context = (sha1Context_t*)pContext;
-    
+
     context->bytes = 0;
     context->totalBytes = 0;
 #if MMCAU_HW_ACC
@@ -1983,7 +2228,7 @@ void SHA1_HashUpdate (void* pContext, const uint8_t* pData, uint32_t numBytes)
 #else
     uint16_t blocks;
     sha1Context_t* context = (sha1Context_t*)pContext;
-    
+
     /* update total byte count */
     context->totalBytes += numBytes;
     /* Check if we have at least 1 SHA1 block */
@@ -1999,7 +2244,7 @@ void SHA1_HashUpdate (void* pContext, const uint8_t* pData, uint32_t numBytes)
         if( context->bytes )
         {
             uint8_t copyBytes = SHA1_BLOCK_SIZE - context->bytes;
-            
+
             FLib_MemCpy(&context->buffer[context->bytes], pData, copyBytes);
             SHA1_hash_n(context->buffer, 1, context->hash);
             pData += copyBytes;
@@ -2038,13 +2283,13 @@ void SHA1_HashFinish (void* pContext, uint8_t*  pOutput)
     SHA_ClkDeinit(SHA0);
     /* Unlock SHA HW resource and allow device to go to low power */
     SecLib_AllowToSleep();
-    SECLIB_MUTEX_UNLOCK();
+    SECLIB_AES_MUTEX_UNLOCK();
 #else
     uint32_t i;
     uint32_t temp;
     sha1Context_t* context = (sha1Context_t*)pContext;
     uint32_t numBytes;
-    
+
     /* update remaining bytes */
     numBytes = context->bytes;
     /* Add 1 bit (a 0x80 byte) after the message to begin padding */
@@ -2069,7 +2314,7 @@ void SHA1_HashFinish (void* pContext, uint8_t*  pOutput)
         temp = context->hash[i];
         FLib_MemCpyReverseOrder(&context->hash[i], &temp, sizeof(uint32_t));
     }
-    
+
     /* Copy the generated hash to the indicated output location */
     FLib_MemCpy(pOutput, (uint8_t*)(context->hash), SHA1_HASH_SIZE);
 #endif
@@ -2077,7 +2322,7 @@ void SHA1_HashFinish (void* pContext, uint8_t*  pOutput)
 
 
 /*! *********************************************************************************
-* \brief  This function performs all SHA1 steps on multiple bytes: initialize, 
+* \brief  This function performs all SHA1 steps on multiple bytes: initialize,
 *         update and finish.
 *         The final hash value is stored at the provided output location.
 *
@@ -2089,12 +2334,130 @@ void SHA1_HashFinish (void* pContext, uint8_t*  pOutput)
 void SHA1_Hash (const uint8_t* pData, const uint32_t numBytes, uint8_t* pOutput)
 {
     sha1Context_t context;
-    
+
     SHA1_Init(&context);
     SHA1_HashUpdate(&context, pData, numBytes);
     SHA1_HashFinish(&context, pOutput);
 }
 
+/*! *********************************************************************************
+* \brief  Initialize the SHA256 context data in SW.
+*         SHA256_SW_* API was introduced to take into account lengthy SHA256
+*         operations, which would block access to the hardware module. Instead,
+*         software SHA256 can be used. Such an example is in Matter, where a
+*         SHA256 process is started at initialization phase and it's finished
+*         after the commissioning was successful.
+*
+* \param [in]    pContext    Pointer to the SHA256 context data
+*
+********************************************************************************** */
+void SHA256_SW_Init(void* pContext)
+{
+    sha256Context_t* context = (sha256Context_t*)pContext;
+
+    context->bytes = 0;
+    context->totalBytes = 0;
+#if FSL_FEATURE_SOC_MMCAU_COUNT
+    (void)mmcau_sha256_initialize_output((const unsigned int*)context->hash);
+#else
+    sw_sha256_initialize_output(context->hash);
+#endif
+}
+
+
+/*! *********************************************************************************
+* \brief  Perform SW SHA256 on multiple bytes and updates the context data.
+*
+* \param [in]    pContext    Pointer to the SHA256 context data
+* \param [in]    pData       Pointer to the input data
+* \param [in]    numBytes    Number of bytes to hash
+*
+********************************************************************************** */
+void SHA256_SW_Update(void* pContext, const uint8_t* pData, uint32_t numBytes)
+{
+    uint16_t blocks;
+    sha256Context_t* context = (sha256Context_t*)pContext;
+
+    /* update total byte count */
+    context->totalBytes += numBytes;
+    /* Check if we have at least 1 SHA256 block */
+    if( context->bytes + numBytes < SHA256_BLOCK_SIZE )
+    {
+        /* store bytes for later processing */
+        FLib_MemCpy(&context->buffer[context->bytes], pData, numBytes);
+        context->bytes += numBytes;
+    }
+    else
+    {
+        /* Check for bytes leftover from previous update */
+        if( context->bytes )
+        {
+            uint8_t copyBytes = SHA256_BLOCK_SIZE - context->bytes;
+
+            FLib_MemCpy(&context->buffer[context->bytes], pData, copyBytes);
+            SHA256_hash_n(context->buffer, 1, context->hash);
+            pData += copyBytes;
+            numBytes -= copyBytes;
+            context->bytes = 0;
+        }
+        /* Hash 64 bytes blocks */
+        blocks = numBytes/SHA256_BLOCK_SIZE;
+        SHA256_hash_n(pData, blocks, context->hash);
+        numBytes -= blocks*SHA256_BLOCK_SIZE;
+        pData += blocks*SHA256_BLOCK_SIZE;
+        /* Check for remaining bytes */
+        if( numBytes )
+        {
+            context->bytes = numBytes;
+            FLib_MemCpy(context->buffer, pData, numBytes);
+        }
+    }
+}
+
+
+/*! *********************************************************************************
+* \brief  Finalize the SW SHA256 hash computation and clear the context data.
+*         The final hash value is stored at the provided output location.
+*
+* \param [in]       pContext    Pointer to the SHA256 context data
+* \param [out]      pOutput     Pointer to the output location
+*
+********************************************************************************** */
+void SHA256_SW_Finish(void* pContext, uint8_t* pOutput)
+{
+    uint32_t i;
+    uint32_t temp;
+    uint32_t numBytes;
+    sha256Context_t* context = (sha256Context_t*)pContext;
+
+    /* update remaining bytes */
+    numBytes = context->bytes;
+    /* Add 1 bit (a 0x80 byte) after the message to begin padding */
+    context->buffer[numBytes++] = 0x80;
+    /* Chack for space to fit an 8 byte length field plus the 0x80 */
+    if( context->bytes >= 56 )
+    {
+        /* Fill the rest of the chunk with zeros */
+        FLib_MemSet(&context->buffer[numBytes], 0, SHA256_BLOCK_SIZE - numBytes);
+        SHA256_hash_n(context->buffer, 1, context->hash);
+        numBytes = 0;
+    }
+    /* Fill the rest of the chunk with zeros */
+    FLib_MemSet(&context->buffer[numBytes], 0, SHA256_BLOCK_SIZE - numBytes);
+    /* Append the total length of the message(Big Endian), in bits (bytes << 3) */
+    context->totalBytes <<= 3;
+    FLib_MemCpyReverseOrder(&context->buffer[60], &context->totalBytes, sizeof(uint32_t));
+    SHA256_hash_n(context->buffer, 1, context->hash);
+    /* Convert to Big Endian */
+    for(i=0; i<SHA256_HASH_SIZE/sizeof(uint32_t); i++)
+    {
+        temp = context->hash[i];
+        FLib_MemCpyReverseOrder(&context->hash[i], &temp, sizeof(uint32_t));
+    }
+
+    /* Copy the generated hash to the indicated output location */
+    FLib_MemCpy(pOutput, (uint8_t*)(context->hash), SHA256_HASH_SIZE);
+}
 
 /*! *********************************************************************************
 * \brief  This function allocates a memory buffer for a SHA256 context structure
@@ -2106,7 +2469,7 @@ void SHA1_Hash (const uint8_t* pData, const uint32_t numBytes, uint8_t* pOutput)
 void* SHA256_AllocCtx (void)
 {
     void* sha256Ctx = MEM_BufferAlloc(sizeof(sha256Context_t));
-    
+
     return sha256Ctx;
 }
 
@@ -2138,7 +2501,7 @@ void SHA256_CloneCtx (void* pDestCtx, void* pSourceCtx)
 
 
 /*! *********************************************************************************
-* \brief  This function initializes the SHA256 context data
+* \brief  This function initializes the SHA256 context data.
 *
 * \param [in]    pContext    Pointer to the SHA256 context data
 *                            Allocated using SHA256_AllocCtx()
@@ -2147,22 +2510,45 @@ void SHA256_CloneCtx (void* pDestCtx, void* pSourceCtx)
 void SHA256_Init (void* pContext)
 {
 #if JN_SHA_HW_ACC
-    /* lock SHA HW resource and */
-    /* prevent device to go to low power until SHA processing finished */
-    SecLib_DisallowToSleep();
-    SECLIB_MUTEX_LOCK();
-    SHA_ClkInit(SHA0);
-    SHA_Init(SHA0, pContext, kSHA_Sha256);
-#else  
-    sha256Context_t* context = (sha256Context_t*)pContext;
-    
-    context->bytes = 0;
-    context->totalBytes = 0;
-#if FSL_FEATURE_SOC_MMCAU_COUNT
-    (void)mmcau_sha256_initialize_output((const unsigned int*)context->hash);
+    /* Timeout is set to 0 to force a task to switch to software SHA256
+     * if mutex is already locked (hardware SHA256 operation in progress).*/
+    if (SECLIB_SHA_MUTEX_LOCK(0) == osaStatus_Success && sHwSha256Context == NULL)
+    {
+        SecLib_DisallowToSleep();
+        sHwSha256Context = pContext;
+        SHA_ClkInit(SHA0);
+        SHA_Init(SHA0, pContext, kSHA_Sha256);
+    }
+    else
+    {
+#if gSecLibUseSha256Alt_d
+        SHA256_SW_Init(pContext);
 #else
-    sw_sha256_initialize_output(context->hash);
+        /* User should explicitly use the switch mechanism between software and
+         * hardware SHA256.
+         * You are reaching this assert if a hardware SHA256 is in process and
+         * another hardware SHA256 process is started. For example, this can
+         * happen in mbedtls_entropy_func, where a SHA256 is started before the
+         * previous one is finished:
+         *   SHA256_Init(context1) -> SHA256_HashUpdate(context1)
+         *   -> SHA256_Init(context2)
+         * Please set gSecLibUseSha256Alt_d to 1 if you want to avoid this assert.
+         * This will enable switching to software SHA256, if the mutex cannot be
+         * locked. Please note that if mbedtls_sha256 ALT module is also used,
+         * mbedlts_sha256_context will be defined inside sha256_alt.h.
+         * mbedtls_sha256_context should be defined as sha256Context_t for this
+         * mechanism to work correctly. Otherwise, there is a possibility of data
+         * corruption due to memory differences between the structures (i.e. sha_ctx_t
+         * and sha256Context_t).
+         *
+         * Please note:
+         * - port/matter/ksdk_mbedtls.c redirects SHA256 calls through SecLib.
+         * - port/ksdk/ksdk_mbedtls.c calls SHA256 driver API directly. */
+        assert(0);
 #endif
+    }
+#else
+    SHA256_SW_Init(pContext);
 #endif
 }
 
@@ -2179,45 +2565,21 @@ void SHA256_Init (void* pContext)
 void SHA256_HashUpdate(void* pContext, const uint8_t* pData, uint32_t numBytes)
 {
 #if JN_SHA_HW_ACC
-    SHA_Update(SHA0, pContext, pData, numBytes);
-#else
-    uint16_t blocks;
-    sha256Context_t* context = (sha256Context_t*)pContext;
-
-    /* update total byte count */
-    context->totalBytes += numBytes;
-    /* Check if we have at least 1 SHA256 block */
-    if( context->bytes + numBytes < SHA256_BLOCK_SIZE )
+    if (sHwSha256Context == pContext)
     {
-        /* store bytes for later processing */
-        FLib_MemCpy(&context->buffer[context->bytes], pData, numBytes);
-        context->bytes += numBytes;
+        SHA_Update(SHA0, pContext, pData, numBytes);
     }
     else
     {
-        /* Check for bytes leftover from previous update */
-        if( context->bytes )
-        {
-            uint8_t copyBytes = SHA256_BLOCK_SIZE - context->bytes;
-            
-            FLib_MemCpy(&context->buffer[context->bytes], pData, copyBytes);
-            SHA256_hash_n(context->buffer, 1, context->hash);
-            pData += copyBytes;
-            numBytes -= copyBytes;
-            context->bytes = 0;
-        }
-        /* Hash 64 bytes blocks */
-        blocks = numBytes/SHA256_BLOCK_SIZE;
-        SHA256_hash_n(pData, blocks, context->hash);
-        numBytes -= blocks*SHA256_BLOCK_SIZE;
-        pData += blocks*SHA256_BLOCK_SIZE;
-        /* Check for remaining bytes */
-        if( numBytes )
-        {
-            context->bytes = numBytes;
-            FLib_MemCpy(context->buffer, pData, numBytes);
-        }
+#if gSecLibUseSha256Alt_d
+        SHA256_SW_Update(pContext, pData, numBytes);
+#else
+        /* See explanation in SHA256_Init. */
+        assert(0);
+#endif
     }
+#else
+    SHA256_SW_Update(pContext, pData, numBytes);
 #endif
 }
 
@@ -2234,50 +2596,31 @@ void SHA256_HashUpdate(void* pContext, const uint8_t* pData, uint32_t numBytes)
 void SHA256_HashFinish (void* pContext, uint8_t* pOutput)
 {
 #if JN_SHA_HW_ACC
-    SHA_Finish(SHA0, pContext, pOutput, NULL);
-    SHA_ClkDeinit(SHA0);
-    /* Unlock SHA HW resource and allow device to go to low power */
-    SecLib_AllowToSleep();
-    SECLIB_MUTEX_UNLOCK();
+    if (sHwSha256Context == pContext)
+    {
+        sHwSha256Context = NULL;
+        SHA_Finish(SHA0, pContext, pOutput, NULL);
+        SHA_ClkDeinit(SHA0);
+        /* Unlock SHA HW resource and allow device to go to low power */
+        SecLib_AllowToSleep();
+        SECLIB_SHA_MUTEX_UNLOCK();
+    }
+    else
+    {
+#if gSecLibUseSha256Alt_d
+        SHA256_SW_Finish(pContext, pOutput);
 #else
-    uint32_t i;
-    uint32_t temp;
-    sha256Context_t* context = (sha256Context_t*)pContext;
-    uint32_t numBytes;
-
-    /* update remaining bytes */
-    numBytes = context->bytes;
-    /* Add 1 bit (a 0x80 byte) after the message to begin padding */
-    context->buffer[numBytes++] = 0x80;
-    /* Chack for space to fit an 8 byte length field plus the 0x80 */
-    if( context->bytes >= 56 )
-    {
-        /* Fill the rest of the chunk with zeros */
-        FLib_MemSet(&context->buffer[numBytes], 0, SHA256_BLOCK_SIZE - numBytes);
-        SHA256_hash_n(context->buffer, 1, context->hash);
-        numBytes = 0;
+        /* See explanation in SHA256_Init. */
+        assert(0);
+#endif
     }
-    /* Fill the rest of the chunk with zeros */
-    FLib_MemSet(&context->buffer[numBytes], 0, SHA256_BLOCK_SIZE - numBytes);
-    /* Append the total length of the message(Big Endian), in bits (bytes << 3) */
-    context->totalBytes <<= 3;
-    FLib_MemCpyReverseOrder(&context->buffer[60], &context->totalBytes, sizeof(uint32_t));
-    SHA256_hash_n(context->buffer, 1, context->hash);
-    /* Convert to Big Endian */
-    for(i=0; i<SHA256_HASH_SIZE/sizeof(uint32_t); i++)
-    {
-        temp = context->hash[i];
-        FLib_MemCpyReverseOrder(&context->hash[i], &temp, sizeof(uint32_t));
-    }
-    
-    /* Copy the generated hash to the indicated output location */
-    FLib_MemCpy(pOutput, (uint8_t*)(context->hash), SHA256_HASH_SIZE);
+#else
+    SHA256_SW_Finish(pContext, pOutput);
 #endif
 }
 
-
 /*! *********************************************************************************
-* \brief  This function performs all SHA256 steps on multiple bytes: initialize, 
+* \brief  This function performs all SHA256 steps on multiple bytes: initialize,
 *         update and finish.
 *         The final hash value is stored at the provided output location.
 *
@@ -2289,7 +2632,7 @@ void SHA256_HashFinish (void* pContext, uint8_t* pOutput)
 void SHA256_Hash(const uint8_t* pData, uint32_t numBytes, uint8_t* pOutput)
 {
     sha256Context_t context;
-    
+
     SHA256_Init(&context);
     SHA256_HashUpdate(&context, pData, numBytes);
     SHA256_HashFinish(&context, pOutput);
@@ -2306,7 +2649,7 @@ void SHA256_Hash(const uint8_t* pData, uint32_t numBytes, uint8_t* pOutput)
 void* HMAC_SHA256_AllocCtx(void)
 {
     void* hmacSha256Ctx = MEM_BufferAlloc(sizeof(HMAC_SHA256_context_t));
-    
+
     return hmacSha256Ctx;
 }
 
@@ -2328,35 +2671,36 @@ void HMAC_SHA256_FreeCtx(void* pContext)
 *
 * \param [in]    pContext    Pointer to the HMAC SHA256 context data
 *                            Allocated using HMAC_SHA256_AllocCtx()
-* \param [in]    pKey        Pointer to the HMAC key
-* \param [in]    keyLen      Length of the HMAC key in bytes
+* \param [in]    InKey       Pointer to the HMAC key - Input Key material
+* \param [in]    InKeyLen    Length of the HMAC key in bytes
 *
 ********************************************************************************** */
-void HMAC_SHA256_Init(void* pContext, uint8_t* pKey, uint32_t keyLen)
+void HMAC_SHA256_Init(void* pContext, const uint8_t* InKey, const size_t InKeyLen)
 {
     uint8_t i;
     HMAC_SHA256_context_t* context = (HMAC_SHA256_context_t*)pContext;
     uint8_t sha256HashKeyBuffer[SHA256_HASH_SIZE] = {0};
+    uint8_t * pKey;
+    size_t keyLen;
 
-    if( keyLen > SHA256_BLOCK_SIZE )    
+    if( InKeyLen > SHA256_BLOCK_SIZE )
     {
-        SHA256_Hash(pKey, keyLen, sha256HashKeyBuffer);
+        SHA256_Hash(InKey, InKeyLen, sha256HashKeyBuffer);
         pKey = sha256HashKeyBuffer;
         keyLen = SHA256_HASH_SIZE;
     }
-
-    /* Create i_pad */
-    for(i=0; i<keyLen; i++)
+    else
     {
-        context->pad[i] = pKey[i] ^ gHmacIpad_c;
+        pKey = (uint8_t*)InKey;
+        keyLen = InKeyLen;
     }
-
-    for(i=keyLen; i<SHA256_BLOCK_SIZE; i++)
-    {
-        context->pad[i] = gHmacIpad_c;
-    }
-    /* start hashing of the i_key_pad */
     SHA256_Init(&context->shaCtx);
+    FLib_MemSet(context->pad, gHmacIpad_c, SHA256_BLOCK_SIZE);
+    for( i = 0; i < keyLen; i++ )
+    {
+        context->pad[i] ^= pKey[i];
+    }
+    /* start hashing of the i_pad */
     SHA256_HashUpdate(&context->shaCtx, context->pad, SHA256_BLOCK_SIZE);
 
     /* create o_pad by xor-ing pad[i] with 0x36 ^ 0x5C: */
@@ -2365,7 +2709,6 @@ void HMAC_SHA256_Init(void* pContext, uint8_t* pKey, uint32_t keyLen)
         context->pad[i] ^= (gHmacIpad_c^gHmacOpad_c);
     }
 }
-
 
 /*! *********************************************************************************
 * \brief  This function performs HMAC update with the input data.
@@ -2376,10 +2719,10 @@ void HMAC_SHA256_Init(void* pContext, uint8_t* pKey, uint32_t keyLen)
 * \param [in]    numBytes    Number of bytes to hash
 *
 ********************************************************************************** */
-void HMAC_SHA256_Update(void* pContext, uint8_t* pData, uint32_t numBytes)
+void HMAC_SHA256_Update(void* pContext, const uint8_t* pData, uint32_t numBytes)
 {
     HMAC_SHA256_context_t* context = (HMAC_SHA256_context_t*)pContext;
-    
+
     SHA256_HashUpdate(&context->shaCtx, pData, numBytes);
 }
 
@@ -2409,7 +2752,7 @@ void HMAC_SHA256_Finish(void* pContext, uint8_t* pOutput)
 
 
 /*! *********************************************************************************
-* \brief  This function performs all HMAC SHA256 steps on multiple bytes: initialize, 
+* \brief  This function performs all HMAC SHA256 steps on multiple bytes: initialize,
 *         update, finish, and update context data.
 *         The final HMAC value is stored at the provided output location.
 *
@@ -2420,157 +2763,21 @@ void HMAC_SHA256_Finish(void* pContext, uint8_t* pOutput)
 * \param [in,out]   pOutput     Pointer to the output location
 *
 ********************************************************************************** */
-void HMAC_SHA256 (uint8_t*  pKey,
-                  uint32_t  keyLen,
-                  uint8_t*  pData,
-                  uint32_t  numBytes,
-                  uint8_t*  pOutput)
+void HMAC_SHA256 (const uint8_t *pKey,
+                  const size_t  keyLen,
+                  const uint8_t *pData,
+                  const size_t  numBytes,
+                  uint8_t       *pOutput)
 {
     HMAC_SHA256_context_t context;
-    
+
     HMAC_SHA256_Init(&context, pKey, keyLen);
     HMAC_SHA256_Update(&context, pData, numBytes);
     HMAC_SHA256_Finish(&context, pOutput);
 }
 
-#if mDbgRevertKeys_d
-static ecdhPublicKey_t mReversedPublicKey;
-static ecdhPrivateKey_t mReversedPrivateKey;
-#endif /* mDbgRevertKeys_d */
 
-secResultType_t ECDH_P256_GenerateKeys
-(
-    ecdhPublicKey_t*    pOutPublicKey,
-    ecdhPrivateKey_t*   pOutPrivateKey
-)
-{
-    secResultType_t result;
-    
-    
-    void* pMultiplicationBuffer = MEM_BufferAlloc(gEcP256_MultiplicationBufferSize_c);
-    if (NULL == pMultiplicationBuffer)
-    {
-        result = gSecAllocError_c;
-    }
-    else
-    {
-#if mDbgRevertKeys_d
-        if (gEcdhSuccess_c != Ecdh_GenerateNewKeys(&mReversedPublicKey, &mReversedPrivateKey, pMultiplicationBuffer))
-#else /* !mDbgRevertKeys_d */
-        if (gEcdhSuccess_c != Ecdh_GenerateNewKeys(pOutPublicKey, pOutPrivateKey, pMultiplicationBuffer))
-#endif /* mDbgRevertKeys_d */
-        {
-            result = gSecError_c;
-        }
-        else
-        {
-            result = gSecSuccess_c;
-#if mDbgRevertKeys_d
-            FLib_MemCpyReverseOrder
-            (
-                pOutPublicKey->components_8bit.x,
-                mReversedPublicKey.components_8bit.x,
-                32
-            );
-            FLib_MemCpyReverseOrder
-            (
-                pOutPublicKey->components_8bit.y,
-                mReversedPublicKey.components_8bit.y,
-                32
-            );
-            FLib_MemCpyReverseOrder
-            (
-                pOutPrivateKey->raw_8bit,
-                mReversedPrivateKey.raw_8bit,
-                32
-            );
-#endif /* mDbgRevertKeys_d */
-        }
-        MEM_BufferFree(pMultiplicationBuffer);
-    }
-    
-    return result;
-}
 
-#if mDbgRevertKeys_d
-static ecdhDhKey_t mReversedEcdhKey;
-#endif /* mDbgRevertKeys_d */
-
-secResultType_t ECDH_P256_ComputeDhKey
-(
-    ecdhPrivateKey_t*   pPrivateKey,
-    ecdhPublicKey_t*    pPeerPublicKey,
-    ecdhDhKey_t*        pOutDhKey
-)
-{
-    secResultType_t result;
-    ecdhStatus_t ecdhStatus;
-
-    void* pMultiplicationBuffer = MEM_BufferAlloc(gEcP256_MultiplicationBufferSize_c);
-    if (NULL == pMultiplicationBuffer)
-    {
-        result = gSecAllocError_c;
-    }
-    else
-    {
-#if mDbgRevertKeys_d
-        FLib_MemCpyReverseOrder
-        (
-            mReversedPublicKey.components_8bit.x,
-            pPeerPublicKey->components_8bit.x,
-            32
-        );
-        FLib_MemCpyReverseOrder
-        (
-            mReversedPublicKey.components_8bit.y,
-            pPeerPublicKey->components_8bit.y,
-            32
-        );
-        FLib_MemCpyReverseOrder
-        (
-            mReversedPrivateKey.raw_8bit,
-            pPrivateKey->raw_8bit,
-            32
-        );
-#endif /* mDbgRevertKeys_d */
-
-#if mDbgRevertKeys_d
-        ecdhStatus = Ecdh_ComputeDhKey(&mReversedPrivateKey, &mReversedPublicKey, &mReversedEcdhKey, pMultiplicationBuffer);
-#else /* !mDbgRevertKeys_d */
-        ecdhStatus = Ecdh_ComputeDhKey(pPrivateKey, pPeerPublicKey, pOutDhKey, pMultiplicationBuffer);
-#endif /* mDbgRevertKeys_d */
-
-        if (gEcdhInvalidPublicKey_c == ecdhStatus)
-        {
-            result = gSecInvalidPublicKey_c;
-        }
-        else if (gEcdhSuccess_c != ecdhStatus)
-        {
-            result = gSecError_c;
-        }
-        else
-        {
-            result = gSecSuccess_c;
-#if mDbgRevertKeys_d
-            FLib_MemCpyReverseOrder
-            (
-                pOutDhKey->components_8bit.x,
-                mReversedEcdhKey.components_8bit.x,
-                32
-            );
-            FLib_MemCpyReverseOrder
-            (
-                pOutDhKey->components_8bit.y,
-                mReversedEcdhKey.components_8bit.y,
-                32
-            );
-#endif /* mDbgRevertKeys_d */
-        }
-        MEM_BufferFree(pMultiplicationBuffer);
-    }
-
-    return result;
-}
 
 /****************************************************************************
  *
@@ -2857,7 +3064,7 @@ void vACI_OptimisedCcmStar(bool_t         bEncrypt,
                 /* Start block counter at 1 for PDU; A[0] is for Mic */
                 u32BlockCnt++;
                 UPDATE_NONCE_COUNTER(puNonce->au8, u32BlockCnt);
-               
+
                 /* Encrypt the Counter */
                 (void)AES_128_ECB_Encrypt(
                          (uint8_t*)puNonce,
@@ -2908,237 +3115,11 @@ void vACI_OptimisedCcmStar(bool_t         bEncrypt,
     }
 }
 
-/*! *********************************************************************************
-* \brief  This function performs initialization of the callback used to offload
-* elliptic curve multiplication.
-*
-* \param[in]  pfCallback Pointer to the function used to handle multiplication.
-*
-********************************************************************************** */
-void SecLib_SetExternalMultiplicationCb
-(
-    secLibCallback_t pfCallback
-)
-{
-    pfSecLibMultCallback = pfCallback;
-}
 
-/*! *********************************************************************************
-* \brief  This function performs calls the multiplication Callback.
-*
-* \param[in]  pMsg Pointer to the data used in multiplication.
-*
-********************************************************************************** */
-void SecLib_ExecMultiplicationCb
-(
-    computeDhKeyParam_t *pMsg
-)
-{
-    if (pfSecLibMultCallback != NULL)
-    {
-        pfSecLibMultCallback(pMsg);
-    }
-}
-/************************************************************************************
-* \brief Generates a new ECDH P256 Private/Public key pair. This function starts the
-*        ECDH generate procedure. The pDhKeyData must be allocated and kept
-*        allocated for the time of the computation procedure.
-*        When the result is gSecResultPending_c the memory should be kept until the
-*        last step.
-*        In any other result messages the data shall be cleared after this call.
-*
-* \param[in]  pDhKeyData Pointer to the structure holding information about the
-*                        multiplication
-*
-* \return gSecSuccess_c, gSecResultPending_c or error
-*
-************************************************************************************/
-secResultType_t ECDH_P256_GenerateKeysSeg
-(
-    computeDhKeyParam_t *pDhKeyData
-)
-{
-    secResultType_t result;
 
-    /* The callback is NULL when there is no async ECDH */
-    if (pfSecLibMultCallback == NULL)
-    {
-        result = ECDH_P256_GenerateKeys(&pDhKeyData->outPoint, &pDhKeyData->privateKey);
-    }
-    else
-    {
-        void* pMultiplicationBuffer = MEM_BufferAlloc(gEcP256_MultiplicationBufferSize_c);
-        if (NULL == pMultiplicationBuffer)
-        {
-            result = gSecAllocError_c;
-        }
-        else
-        {
-            pDhKeyData->pWorkBuffer = pMultiplicationBuffer;
-            if (gEcdhSuccess_c != Ecdh_GenerateNewKeysSeg(pDhKeyData))
-            {
-                result = gSecError_c;
-            }
-            else
-            {
-                result = gSecResultPending_c;
-            }
-        }
-    }
-    return result;
-}
 
-/************************************************************************************
-* \brief Computes the Diffie-Hellman Key for an ECDH P256 key pair. This function
-*        starts the ECDH key pair generate procedure. The pDhKeyData must be
-*        allocated and kept allocated for the time of the computation procedure.
-*        When the result is gSecResultPending_c the memory should be kept until the
-*        last step, when it can be safely freed.
-*        In any other result messages the data shall be cleared after this call.
-*
-* \param[in]  pDhKeyData Pointer to the structure holding information about the
-*                        multiplication
-*
-* \return gSecSuccess_c or error
-*
-************************************************************************************/
-secResultType_t ECDH_P256_ComputeDhKeySeg
-(
-    computeDhKeyParam_t*        pDhKeyData
-)
-{
-    secResultType_t result;
 
-    if (pfSecLibMultCallback == NULL)
-    {
-        result = ECDH_P256_ComputeDhKey(&pDhKeyData->privateKey, &pDhKeyData->peerPublicKey,
-                                        &pDhKeyData->outPoint);
-    }
-    else
-    {
-        ecdhStatus_t ecdhStatus;
 
-        void* pMultiplicationBuffer = MEM_BufferAlloc(gEcP256_MultiplicationBufferSize_c);
-        if (NULL == pMultiplicationBuffer)
-        {
-            result = gSecAllocError_c;
-        }
-        else
-        {
-#if mDbgRevertKeys_d
-            FLib_MemCpyReverseOrder
-            (
-                mReversedPublicKey.components_8bit.x,
-                pDhKeyData->peerPublicX,
-                sizeof(mReversedPublicKey.components_8bit.x)
-            );
-            FLib_MemCpyReverseOrder
-            (
-                mReversedPublicKey.components_8bit.y,
-                pDhKeyData->peerPublicY,
-                sizeof(mReversedPublicKey.components_8bit.y)
-            );
-            FLib_MemCpyReverseOrder
-            (
-                mReversedPrivateKey.raw_8bit,
-                pDhKeyData->privateKey,
-                sizeof(mReversedPrivateKey.raw_8bit)
-            );
-#endif /* mDbgRevertKeys_d */
-
-            pDhKeyData->pWorkBuffer = pMultiplicationBuffer;
-#if mDbgRevertKeys_d
-            FLib_MemCpy(pDhKeyData->peerPublicX, mReversedPublicKey.components_32bit.x, sizeof(pDhKeyData->peerPublicX));
-            FLib_MemCpy(pDhKeyData->peerPublicY, mReversedPublicKey.components_32bit.y, sizeof(pDhKeyData->peerPublicY));
-            FLib_MemCpy(pDhKeyData->privateKey, mReversedPrivateKey.raw_32bit, sizeof(pDhKeyData->privateKey));
-#endif /* mDbgRevertKeys_d */
-            ecdhStatus = Ecdh_ComputeDhKeySeg(pDhKeyData);
-
-            if (gEcdhInvalidPublicKey_c == ecdhStatus)
-            {
-                result = gSecInvalidPublicKey_c;
-            }
-            else if (gEcdhSuccess_c != ecdhStatus)
-            {
-                result = gSecError_c;
-            }
-            else
-            {
-                result = gSecResultPending_c;
-            }
-        }
-    }
-    return result;
-}
-
-/************************************************************************************
-* \brief Handle one step of ECDH multiplication depending on the number of steps at
-*        a time according to gSecLibEcStepsAtATime. After the last step is completed
-*        the function returns TRUE and the upper layer is responsible for clearing
-*        pData.
-*
-* \param[in]  pData Pointer to the structure holding information about the
-*                   multiplication
-*
-* \return TRUE if the multiplication is completed
-*         FALSE when the function needs to be called again
-*
-************************************************************************************/
-bool_t SecLib_HandleMultiplyStep
-(
-    computeDhKeyParam_t *pData
-)
-{
-    bool_t result = FALSE;
-    uint8_t steps = ((255U + 1U) / gSecLibEcStepsAtATime);
-
-    /* Intermediate step */
-    if (pData->procStep < steps)
-    {
-        /* Compute step */
-        Ecdh_ComputeJacobiChunk(255U - (pData->procStep * gSecLibEcStepsAtATime), gSecLibEcStepsAtATime, pData);
-        /* Go to the next step */
-        pData->procStep++;
-        result = FALSE;
-    }
-    /* Final step was completed -> resume SecLib procedure */
-    else
-    {
-        Ecdh_JacobiCompleteMult(pData);
-
-#if mDbgRevertKeys_d
-        {
-            FLib_MemCpyReverseOrder
-            (
-                mReversedEcdhKey.components_8bit.x,
-                pData->outX,
-                sizeof(mReversedEcdhKey.components_8bit.x)
-            );
-            FLib_MemCpyReverseOrder
-            (
-                mReversedEcdhKey.components_8bit.y,
-                pData->outY,
-                sizeof(mReversedEcdhKey.components_8bit.y)
-            );
-            FLib_MemCpyReverseOrder
-            (
-                pData->outX,
-                mReversedEcdhKey.components_8bit.x,
-                sizeof(pData->outX)
-            );
-            FLib_MemCpyReverseOrder
-            (
-                pData->outY,
-                mReversedEcdhKey.components_8bit.y,
-                sizeof(pData->outY)
-            );
-        }
-#endif /* mDbgRevertKeys_d */
-
-        result = TRUE;
-    }
-    return result;
-}
 
 /*! *********************************************************************************
 *************************************************************************************
@@ -3168,6 +3149,7 @@ static void SHA1_hash_n(const uint8_t* pData, uint32_t nBlk, uint32_t* pHash)
         SecLib_AllowToSleep();
     }
 }
+#endif
 
 /*! *********************************************************************************
 * \brief  This function performs SHA256 on multiple blocks
@@ -3190,7 +3172,6 @@ static void SHA256_hash_n(const uint8_t* pData, uint32_t nBlk, uint32_t* pHash)
         SecLib_AllowToSleep();
     }
 }
-#endif
 
 /****************************************************************************
  *
@@ -3208,7 +3189,7 @@ static void SHA256_hash_n(const uint8_t* pData, uint32_t nBlk, uint32_t* pHash)
  * @note
  *
  ****************************************************************************/
-uint32_t u32Reverse(uint32_t u32InWord)
+static uint32_t u32Reverse(uint32_t u32InWord)
 {
     uint32_t u32OutWord;
 
@@ -3311,7 +3292,7 @@ void AES_128_ECB_Decrypt(uint8_t* pInput,
                          uint8_t* pOutput)
 {
     AES_param_t pAES;
-    
+
     pAES.CTR_counter = NULL;
     pAES.Key = pKey;
     pAES.Len = inputLen;
@@ -3324,7 +3305,7 @@ void AES_128_ECB_Decrypt(uint8_t* pInput,
     AESM_SetParam( AES128ECB_Dec_Id, pAES, AES_128_ECB_Dec_HW);
     AESM_Start(AES128ECB_Dec_Id);
 #else
-    AES_128_ECB_Dec_HW(&pAES);  
+    AES_128_ECB_Dec_HW(&pAES);
 #endif /* USE_TASK_FOR_HW_AES */
 }
 
@@ -3348,7 +3329,7 @@ void AES_128_ECB_Block_Decrypt(uint8_t* pInput,
                                uint8_t* pOutput)
 {
     AES_param_t pAES;
-    
+
     pAES.CTR_counter = NULL;
     pAES.Key = (uint8_t*)pKey;
     pAES.Len = numBlocks * 16;
@@ -3361,7 +3342,7 @@ void AES_128_ECB_Block_Decrypt(uint8_t* pInput,
     AESM_SetParam( AES128ECBB_Dec_Id, pAES, AES_128_ECB_Block_Dec_HW);
     AESM_Start(AES128ECBB_Dec_Id);
 #else
-    AES_128_ECB_Block_Dec_HW(&pAES);    
+    AES_128_ECB_Block_Dec_HW(&pAES);
 #endif /* USE_TASK_FOR_HW_AES */
 }
 
@@ -3385,7 +3366,7 @@ void AES_128_ECB_Block_Decrypt(uint8_t* pInput,
                                uint8_t* pOutput)
 {
     AES_param_t pAES;
-    
+
     pAES.CTR_counter = NULL;
     pAES.Key = (uint8_t*)pKey;
     pAES.Len = numBlocks * 16;
@@ -3398,7 +3379,7 @@ void AES_128_ECB_Block_Decrypt(uint8_t* pInput,
     AESM_SetParam( AES128ECBB_Dec_Id, pAES, AES_128_ECB_Block_Dec_HW);
     AESM_Start(AES128ECBB_Dec_Id);
 #else
-    AES_128_ECB_Block_Dec_HW(&pAES);    
+    AES_128_ECB_Block_Dec_HW(&pAES);
 #endif /* USE_TASK_FOR_HW_AES */
 }
 
@@ -3422,7 +3403,7 @@ void AES_128_ECB_Block_Decrypt(uint8_t* pInput,
                                uint8_t* pOutput)
 {
     AES_param_t pAES;
-    
+
     pAES.CTR_counter = NULL;
     pAES.Key = (uint8_t*)pKey;
     pAES.Len = numBlocks * 16;
@@ -3435,11 +3416,11 @@ void AES_128_ECB_Block_Decrypt(uint8_t* pInput,
     AESM_SetParam( AES128ECBB_Dec_Id, pAES, AES_128_ECB_Block_Dec_HW);
     AESM_Start(AES128ECBB_Dec_Id);
 #else
-    AES_128_ECB_Block_Dec_HW(&pAES);    
+    AES_128_ECB_Block_Dec_HW(&pAES);
 #endif /* USE_TASK_FOR_HW_AES */
 }
 
- 
+
 /*! *********************************************************************************
 * \brief  This function performs AES-128-CTR decryption on a message block.
 *
@@ -3461,7 +3442,7 @@ void AES_128_CTR_Decrypt(uint8_t* pInput,
                          uint8_t* pOutput)
 {
     AES_param_t pAES;
-    
+
     pAES.CTR_counter = pCounter;
     pAES.Key = pKey;
     pAES.Len = inputLen;
@@ -3498,7 +3479,7 @@ static void AES_128_ECB_Enc_HW(AES_param_t* ECB_p)
     FLib_MemCpy(tempBuffIn, ECB_p->pPlain, ECB_p->Len);
     AES_128_Encrypt(tempBuffIn, ECB_p->Key, tempBuffOut);
     FLib_MemCpy(ECB_p->pCipher, tempBuffOut, AES_BLOCK_SIZE);
-#if USE_TASK_FOR_HW_AES     
+#if USE_TASK_FOR_HW_AES
     AESM_Complete( AES128ECB_Enc_Id );
 #endif
 }
@@ -3527,7 +3508,7 @@ static void AES_128_ECB_Dec_HW(AES_param_t* ECB_p)
     FLib_MemCpy(tempBuffIn, ECB_p->pCipher, ECB_p->Len);
     AES_128_Decrypt(tempBuffIn, ECB_p->Key, tempBuffOut);
     FLib_MemCpy(ECB_p->pPlain, tempBuffOut, ECB_p->Len);
-#if USE_TASK_FOR_HW_AES     
+#if USE_TASK_FOR_HW_AES
     AESM_Complete( AES128ECB_Dec_Id );
 #endif /* USE_TASK_FOR_HW_AES */
 }
@@ -3583,7 +3564,7 @@ static void AES_128_CTR_Enc_HW(AES_param_t* CTR_p)
     SecLib_XorN(tempBuffIn, encrCtr, AES_BLOCK_SIZE);
     FLib_MemCpy(CTR_p->pCipher, tempBuffIn, CTR_p->Len);
     AES_128_IncrementCounter(CTR_p->CTR_counter);
-#if USE_TASK_FOR_HW_AES     
+#if USE_TASK_FOR_HW_AES
     AESM_Complete( AES128CTR_Enc_Id );
 #endif
 }
@@ -3618,7 +3599,7 @@ static void AES_128_CTR_Dec_HW(AES_param_t* CTR_p)
     SecLib_XorN(tempBuffIn, encrCtr, AES_BLOCK_SIZE);
     FLib_MemCpy(CTR_p->pPlain, tempBuffIn, CTR_p->Len);
     AES_128_IncrementCounter(CTR_p->CTR_counter);
-#if USE_TASK_FOR_HW_AES     
+#if USE_TASK_FOR_HW_AES
     AESM_Complete( AES128CTR_Dec_Id );
 #endif
 }
@@ -3668,7 +3649,7 @@ static void AES_128_CMAC_HW(AES_param_t* CMAC_p)
         ECBB_p->pPlain += AES_BLOCK_SIZE;
         ECBB_p->pCipher += AES_BLOCK_SIZE;
     }
-#if USE_TASK_FOR_HW_AES     
+#if USE_TASK_FOR_HW_AES
     AESM_Complete( AES128ECBB_Enc_Id );
 #endif
 }
@@ -3688,7 +3669,7 @@ static void AES_128_ECB_Block_Dec_HW(AES_param_t* ECBB_p)
         ECBB_p->pPlain += AES_BLOCK_SIZE;
         ECBB_p->pCipher += AES_BLOCK_SIZE;
     }
-#if USE_TASK_FOR_HW_AES     
+#if USE_TASK_FOR_HW_AES
     AESM_Complete( AES128ECBB_Dec_Id );
 #endif
 }
@@ -3723,7 +3704,7 @@ static void AES_128_CTR_Enc_HW(AES_param_t* CTR_p)
     SecLib_XorN(tempBuffIn, encrCtr, AES_BLOCK_SIZE);
     FLib_MemCpy(CTR_p->pCipher, tempBuffIn, CTR_p->Len);
     AES_128_IncrementCounter(CTR_p->CTR_counter);
-#if USE_TASK_FOR_HW_AES     
+#if USE_TASK_FOR_HW_AES
     AESM_Complete( AES128CTR_Enc_Id );
 #endif
 }
@@ -3758,10 +3739,11 @@ static void AES_128_CTR_Dec_HW(AES_param_t* CTR_p)
     SecLib_XorN(tempBuffIn, encrCtr, AES_BLOCK_SIZE);
     FLib_MemCpy(CTR_p->pPlain, tempBuffIn, CTR_p->Len);
     AES_128_IncrementCounter(CTR_p->CTR_counter);
-#if USE_TASK_FOR_HW_AES     
+#if USE_TASK_FOR_HW_AES
     AESM_Complete( AES128CTR_Dec_Id );
 #endif
 }
+
 
 /*! *********************************************************************************
 * \brief  This function performs hardware AES-128 CMAC encryption
@@ -3787,18 +3769,18 @@ static void AES_128_CMAC_HW(AES_param_t* CMAC_p)
 
     n = (uint8_t) ((CMAC_p->Len + 15) / 16); /* n is number of rounds */
 
-    if (n == 0) 
+    if (n == 0)
     {
         n = 1;
         flag = 0;
-    } 
-    else 
+    }
+    else
     {
-        if ((CMAC_p->Len % 16) == 0) 
+        if ((CMAC_p->Len % 16) == 0)
         { /* last block is a complete block */
             flag = 1;
-        } 
-        else 
+        }
+        else
         { /* last block is not complete block */
             flag = 0;
         }
@@ -3815,11 +3797,11 @@ static void AES_128_CMAC_HW(AES_param_t* CMAC_p)
     }
 
     /* Process the last block  - the last part the MSB first input data */
-    if (flag) 
+    if (flag)
     { /* last block is complete block */
         SecLib_Xor128(&CMAC_p->pPlain[16 * (n - 1)], K1, M_last);
-    } 
-    else 
+    }
+    else
     {
         SecLib_Padding(&CMAC_p->pPlain[16 * (n - 1)], padded, CMAC_p->Len % 16);
         SecLib_Xor128(padded, K2, M_last);
@@ -3856,7 +3838,7 @@ static void AES_128_CMAC_HW(AES_param_t* CMAC_p)
         X[i] = 0;
     }
 
-    for (i = 0; i < n - 1; i++) 
+    for (i = 0; i < n - 1; i++)
     {
         SecLib_Xor128(X, &CMAC_p->pPlain[16 * i], Y); /* Y := Mi (+) X  */
         AES_128_Encrypt(Y, CMAC_p->Key, X); /* X := AES-128(KEY, Y) */
@@ -3865,12 +3847,17 @@ static void AES_128_CMAC_HW(AES_param_t* CMAC_p)
     SecLib_Xor128(X, M_last, Y);
     AES_128_Encrypt(Y, CMAC_p->Key, X);
 
-    for (i = 0; i < 16; i++) 
+    for (i = 0; i < 16; i++)
     {
         CMAC_p->pCipher[i] = X[i];
     }
-#if USE_TASK_FOR_HW_AES     
+#if USE_TASK_FOR_HW_AES
     AESM_Complete( AES128CMAC_Id );
 #endif
 }
 #endif
+
+
+
+
+

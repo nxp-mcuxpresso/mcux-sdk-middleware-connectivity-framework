@@ -81,14 +81,6 @@ extern void ResetMCU(void);
 #define BIT(x)                  (1 << (x))
 #endif
 
-#ifndef FMEAS_SYSCON
-#if defined(FSL_FEATURE_FMEAS_USE_ASYNC_SYSCON) && (FSL_FEATURE_FMEAS_USE_ASYNC_SYSCON)
-#define FMEAS_SYSCON ASYNC_SYSCON
-#else
-#define FMEAS_SYSCON SYSCON
-#endif
-#endif
-
 #define SET_MPU_CTRL(x) (*(uint32_t*)0xe000ed94 = (uint32_t)(x))
 
 #if !defined PWR_PREVENT_SLEEP_IF_LESS_TICKS
@@ -106,14 +98,6 @@ extern void ResetMCU(void);
 #define PWR_PREVENT_SLEEP_IF_LESS_TICKS        (1000)
 #endif
 #endif
-
-/* Tune FRO32K calibration
- * PWR_FRO32K_CAL_SCALE : Calibration period 4: 2^4*30.5us = 488us */
-#define PWR_FRO32K_CAL_WAKEUP_END         0   /* Set to 1 to complete the Cal at the end of the SW wakeup     */
-#define PWR_FRO32K_CAL_SCALE              6   /* ( 4 if PWR_FRO32K_CAL_WAKEUP_END==1 , 5 otherwise)           */
-#define PWR_FRO32K_CAL_AVERAGE            5
-#define FREQ32K_CAL_SHIFT                 4
-#define PWR_FRO32K_CAL_INCOMPLETE_PRINTF  1   /* set to 1 to PRINTF when CAL is completed when we check it    */
 
 #if gSupportBle
 #define PWR_DEBUG   (0)
@@ -232,12 +216,6 @@ static ARM_CM4_register_t  cm4_misc_regs;
 static pfPWRCallBack_t gpfPWR_LowPowerEnterCb;
 static pfPWRCallBack_t gpfPWR_LowPowerExitCb;
 
-static PWR_clock_32k_hk_t mHk32k = {
-    .freq32k          = 32768,
-    .freq32k_16thHz  = (32768 << FREQ32K_CAL_SHIFT), /* expressed in 16th of Hz: (1<<19) */
-    .ppm_32k          = -0x6000,                      /* initialization of the 32k clock calibration in part per miliion */
-};
-
 static pm_power_config_t      pwrm_sleep_config;
 static uint32_t               pwrm_force_retention;
 
@@ -250,6 +228,14 @@ static volatile bool_t        bBLE_Active = TRUE;
 static volatile bool_t        bBLE_Active = FALSE;
 #endif
 
+/* Calculate FRO32K frequency in 1/16 of Hertz to improve accuracy - shall not be modified */
+#define FREQ32K_CAL_SHIFT                 4
+
+static const TMR_clock_32k_hk_t pwr_mHk32k = {
+    .freq32k          = 32768,
+    .freq32k_16thHz  = (32768 << FREQ32K_CAL_SHIFT), /* expressed in 16th of Hz: (1<<19) */
+};
+
 /*****************************************************************************
  *                             PRIVATE FUNCTIONS                             *
  *---------------------------------------------------------------------------*
@@ -258,6 +244,16 @@ static volatile bool_t        bBLE_Active = FALSE;
  * These definitions shall be preceded by the 'static' keyword.              *
  *---------------------------------------------------------------------------*
  *****************************************************************************/
+
+WEAK void * TMR_Get32kHandle(void)
+{
+#if 1 || (cPWR_FullPowerDownMode)
+    return (void*)&pwr_mHk32k;
+#else
+    return NULL;
+#endif
+}
+
 static void Save_CM4_registers(ARM_CM4_register_t * reg_store)
 {
 #if defined(USE_RTOS) && (USE_RTOS)
@@ -412,81 +408,6 @@ void BLE_WAKE_UP_TIMER_IRQHandler(void)
 #endif /* PWR_DEBUG */
 
 
-#if gClkUseFro32K
-
-/* suppose 32MHz crystal is running and 32K running */
-void PWR_Start32KCalibration(void)
-{
-    INPUTMUX_Init(INPUTMUX);
-
-    /* Setup to measure the selected target */
-    INPUTMUX_AttachSignal(INPUTMUX, 1U, kINPUTMUX_Xtal32MhzToFreqmeas);
-    INPUTMUX_AttachSignal(INPUTMUX, 0U, kINPUTMUX_32KhzOscToFreqmeas);
-
-    /* Temporary fix for RFT1366 : JN518x Frequency measure does not work 32kHz
-       if used for target clock */
-    SYSCON->MODEMCTRL |= SYSCON_MODEMCTRL_BLE_LP_OSC32K_EN(1);
-
-    CLOCK_EnableClock(kCLOCK_Fmeas);
-
-    /* Start a measurement cycle and wait for it to complete. If the target
-       clock is not running, the measurement cycle will remain active
-       forever, so a timeout may be necessary if the target clock can stop */
-    FMEAS_StartMeasureWithScale(FMEAS_SYSCON, PWR_FRO32K_CAL_SCALE);
-}
-
-// Return the result in unit of 1/(2^freq_scale)th of Hertz for higher accuracy
-uint32_t PWR_Complete32KCalibration(uint8_t u8Shift)
-{
-    uint32_t        freqComp    = 0U;
-    uint32_t        refCount    = 0U;
-    uint32_t        targetCount = 0U;
-    uint32_t        freqRef     = CLOCK_GetFreq(kCLOCK_Xtal32M);
-
-    if (FMEAS_IsMeasureComplete(FMEAS_SYSCON))
-    {
-        /* Get computed frequency */
-        FMEAS_GetCountWithScale(FMEAS_SYSCON, PWR_FRO32K_CAL_SCALE, &refCount, &targetCount);
-        freqComp = (uint32_t)(((((uint64_t)freqRef)*refCount)<<u8Shift) / targetCount);
-
-        /* Disable the clocks if disable previously */
-        CLOCK_DisableClock(kCLOCK_Fmeas);
-    }
-
-    return freqComp;
-}
-
-void Update32kFrequency(uint32_t freq)
-{
-    if (freq != 0UL)
-    {
-        PWR_clock_32k_hk_t *hk = PWR_GetHk32kHandle();
-
-        uint32_t val = hk->freq32k_16thHz;
-        val = ((val << PWR_FRO32K_CAL_AVERAGE) - val + freq) >> PWR_FRO32K_CAL_AVERAGE ;
-        hk->freq32k_16thHz = val;
-        hk->freq32k = (val >> FREQ32K_CAL_SHIFT);
-
-        PWR_DBG_LOG("freq32k=%d freq32k_16thHz=%d", hk->freq32k, hk->freq32k_16thHz);
-
-    }
-    else
-    {
-        LpIoSet(4, 1);
-        LpIoSet(4, 0);
-        LpIoSet(4, 1);
-        LpIoSet(4, 0);
-
-#if PWR_FRO32K_CAL_INCOMPLETE_PRINTF
-        PWR_DBG_LOG("32K cal incomplete");
-#endif
-    }
-}
-
-
-#endif
-
-
 static void RelinquishXtal32MCtrl(void)
 {
 
@@ -594,8 +515,8 @@ static void vHandleSleepModes(uint32_t mode)
 #endif
 
 #if gClkUseFro32K && gClkRecalFro32K && !PWR_FRO32K_CAL_WAKEUP_END
-        uint32_t freq = PWR_Complete32KCalibration(FREQ32K_CAL_SHIFT);
-        Update32kFrequency(freq);
+        uint32_t freq = FRO32K_CompleteCalibration();
+        (void)freq;
 #endif
 
         /* Going to go to sleep */
@@ -647,7 +568,7 @@ static void vHandleSleepModes(uint32_t mode)
             BOARD_DbgDiagEnable();
 
 #if gClkUseFro32K && gClkRecalFro32K
-            PWR_Start32KCalibration();
+            FRO32K_StartCalibration();
 #endif
 
 #if gSupportBle
@@ -683,8 +604,8 @@ static void vHandleSleepModes(uint32_t mode)
             LpIoSet(1, 1);
 
 #if gClkUseFro32K && gClkRecalFro32K && PWR_FRO32K_CAL_WAKEUP_END
-            uint32_t freq = PWR_Complete32KCalibration(FREQ32K_CAL_SHIFT);
-            Update32kFrequency(freq);
+            uint32_t freq = FRO32K_CompleteCalibration();
+            (void)freq;
 #endif
 
             /* Check if WTIMER enabled and, if so, check running status */
@@ -772,14 +693,6 @@ static PWR_WakeupReason_t PWR_HandleDeepSleep(void)
 
 #endif /* #if (cPWR_FullPowerDownMode)*/
 
-PWR_clock_32k_hk_t *PWR_GetHk32kHandle(void)
-{
-#if (cPWR_FullPowerDownMode)
-    return &mHk32k;
-#else
-    return NULL;
-#endif
-}
 
 /*---------------------------------------------------------------------------
  * Name: PWR_CheckForAndEnterNewPowerState
@@ -865,91 +778,9 @@ static void PWR_InitFunction(bool_t forceInit)
 #if (cPWR_FullPowerDownMode)
     if (forceInit || !isInitialized)
     {
-    #if gClkUseFro32K /* Using 32k FRO */
-        #if gClkRecalFro32K /* Will recalibrate 32k FRO on each warm start */
-        // TODO MCB-539: parallelize FRO32K calibration to reduce the cold boot time
-        uint32_t freq;
-        PWR_clock_32k_hk_t *hk = PWR_GetHk32kHandle();
-
-        PWR_Start32KCalibration();
-        do {
-           freq = PWR_Complete32KCalibration(FREQ32K_CAL_SHIFT);
-        }  while (!freq);
-
-        hk->freq32k_16thHz = freq;
-        hk->freq32k = freq >> FREQ32K_CAL_SHIFT;
-        PWR_DBG_LOG("freq=%d", hk->freq32k);
-
-        #else /* no gClkRecalFro32K */
-        /* Does selected sleep mode require 32kHz oscillator? */
-        if (0 != (PWR_GetDeepSleepConfig() & PWR_CFG_OSC_ON))
-        {
-            bool            fmeas_clk_enable;
-            bool            mdm_clk_enable;
-            uint32_t        freqComp;
-
-            /* Check if XTAL32K has been enabled by application, otherwise
-             * enable the FRO32K and calibrate it - the XTAL32K may not be
-             * present on the board */
-            if (   (0 == (SYSCON->OSC32CLKSEL & SYSCON_OSC32CLKSEL_SEL32KHZ_MASK))
-                || (0 == (PMC->PDRUNCFG & (1UL << kPDRUNCFG_PD_XTAL32K_EN)))
-               )
-            {
-                /* Enable FRO32k */
-                CLOCK_EnableClock(kCLOCK_Fro32k);
-
-                /* Enable 32MHz XTAL if not running - FRO32K already enable if we are here*/
-                if ( !(ASYNC_SYSCON->XTAL32MCTRL & ASYNC_SYSCON_XTAL32MCTRL_XO32M_TO_MCU_ENABLE_MASK) )
-                {
-                    CLOCK_EnableClock(kCLOCK_Xtal32M);
-                }
-
-                /* Fmeas clock gets enabled by the generic calibration code, so note if we
-                   should disable it again afterwards */
-                fmeas_clk_enable = CLOCK_IsClockEnable(kCLOCK_Fmeas);
-
-                /* RFT1366 requires BLE LP clock to be used for 32kHz measurement. It gets
-                   enabled within the generic calibration code, so note if we should
-                   disable it again afterwards */
-                mdm_clk_enable = SYSCON->MODEMCTRL & SYSCON_MODEMCTRL_BLE_LP_OSC32K_EN_MASK;
-
-                /* Call Low Power function to start calibration */
-                PWR_Start32KCalibration();
-
-                /* Call Low Power function to wait for end of calibration */
-                do
-                {
-                    freqComp = PWR_Complete32KCalibration(FREQ32K_CAL_SHIFT);
-                } while (0 == freqComp);
-                /* freqComp is returned in 16th of Hz */
-                /* Disable the clocks if disable previously */
-                if ( !fmeas_clk_enable )
-                {
-                    CLOCK_DisableClock(kCLOCK_Fmeas);
-                }
-
-                if ( !mdm_clk_enable )
-                {
-                    SYSCON->MODEMCTRL &= ~SYSCON_MODEMCTRL_BLE_LP_OSC32K_EN(1);
-                }
-
-                mHk32k.freq32k_16thHz = freqComp;
-                mHk32k.freq32k = freqComp >> FREQ32K_CAL_SHIFT;
-            }
-            else
-            {
-                /* Case of the Xtal32k */
-                mHk32k.freq32k_16thHz = 32768 << FREQ32K_CAL_SHIFT;
-                mHk32k.freq32k = 32768;
-            }
-        }
-        #endif /* gClkRecalFro32K */
-    #else
-        /* If using XTAL 32k, set calibration value to expected value */
-        /* Case of the Xtal32k */
-        mHk32k.freq32k_16thHz = 32768 << FREQ32K_CAL_SHIFT;
-        mHk32k.freq32k = 32768;
-    #endif  /* gClkUseFro32K */
+#if gClkUseFro32K /* Using 32k FRO */
+        FRO32K_Init();
+#endif  /* gClkUseFro32K */
 
         pwrm_force_retention = 0;
         memset(&pwrm_sleep_config, 0x0, sizeof(pm_power_config_t));
@@ -1673,7 +1504,7 @@ PWR_teStatus PWR_vWakeUpIO(uint32_t io_mask)
 
     /* need to reset power down config to take into account changes applied */
     PWR_ResetPowerDownModeConfig();
-    
+
     return status;
 }
 
@@ -1723,7 +1554,7 @@ PWR_teStatus PWR_vWakeUpConfig(uint32_t pwrm_config)
 
     /* need to reset power down config to take into account changes applied */
     PWR_ResetPowerDownModeConfig();
-    
+
     return status;
 }
 
@@ -1790,8 +1621,10 @@ PWR_teStatus PWR_eScheduleActivity(PWR_tsWakeTimerEvent *psWake,
                                    void (*prCallbackfn)(void))
 {
     uint64_t              u64AdjustedTicks;
-    uint32_t u32Ticks;
-    uint32_t freqHz = mHk32k.freq32k;
+    uint32_t              u32Ticks;
+    TMR_clock_32k_hk_t    *mHk32k = (TMR_clock_32k_hk_t*)TMR_Get32kHandle();
+    uint32_t              freqHz = mHk32k->freq32k;
+
     u64AdjustedTicks = u32TimeMs;
     u64AdjustedTicks = u64AdjustedTicks * freqHz / 1000;
 

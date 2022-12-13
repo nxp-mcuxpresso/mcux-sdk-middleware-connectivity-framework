@@ -129,6 +129,7 @@
 #define MILLISECONDS_TO_TICKS32K(x)   (((((uint64_t)x)<<12))/125)
 #endif
 
+
 /************************************************************************************
 *************************************************************************************
 * Public types
@@ -140,7 +141,6 @@ typedef struct _tmr_adapter_pwm_param_type
     uint32_t initValue;
 }tmr_adapter_pwm_param_t;
 
-
 /*
  * \brief   Platofrm specific timer ticks type definition
  */
@@ -149,6 +149,8 @@ typedef struct _tmr_adapter_pwm_param_type
 #else
     typedef uint16_t tmrTimerTicks_t;
 #endif
+
+
 /************************************************************************************
 *************************************************************************************
 * Public prototypes
@@ -183,7 +185,6 @@ void StackTimer_ReprogramDeadline(uint32_t sleep_duration_ticks);
 //#define PostStepTickAssess 1
 
 void SystickCheckDrift(void);
-
 
 
 #ifndef ENABLE_RAM_VECTOR_TABLE

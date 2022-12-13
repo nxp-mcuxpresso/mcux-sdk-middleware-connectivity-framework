@@ -428,6 +428,18 @@ void SerialManagerTask(void)
 #endif
         for( i = 0; i < gSerialManagerMaxInterfaces_c; i++ )
         {
+#if defined(gSerialMgrUseDmaHelper_d) && (gSerialMgrUseDmaHelper_d==1)
+            /*
+             * The DMA helper mechanism sometimes misses an interrupt
+             * and the last byte of a message remains in the SW FIFO.
+             * Push it out by polling whatever remained in the FIFO.
+             */
+            if (i == gSerialMgrDmaHelperIf_c)
+            {
+                USART_Poll(i);
+            }
+#endif /* defined(gSerialMgrUseDmaHelper_d) && (gSerialMgrUseDmaHelper_d==1) */
+
             OSA_InterruptDisable();
             ev = mSerials[i].events & gSMGR_Rx_c;
             mSerials[i].events &= ~gSMGR_Rx_c;
@@ -1046,7 +1058,7 @@ serialStatus_t Serial_Read( uint8_t InterfaceId, uint8_t *pData, uint16_t dataSi
             if (gSerialMgrUsart_c == pSer->serialType)
             {
                 bool_t rx_full;
-
+                OSA_InterruptDisable();
                 serialRingState_t * rx_ring  = &mDrvData[InterfaceId].uartState.rx_ring;
                 rx_full = (0 == rx_ring->space_left);
 
@@ -1058,6 +1070,7 @@ serialStatus_t Serial_Read( uint8_t InterfaceId, uint8_t *pData, uint16_t dataSi
                 {
                     USART_RxIntCtrl(InterfaceId, true);
                 }
+                OSA_InterruptEnable();
             }
             else
 #endif
@@ -1799,7 +1812,13 @@ static serialStatus_t Serial_WriteInternal( uint8_t InterfaceId )
 //        pSer->txQueue[idx].dataSize = 0;
 //        pSer->txQueue[idx].txCallback = NULL;
 //        mSerial_IncIdx_d(pSer->txCurrent, gSerialMgrTxQueueSize_c)
+#if defined(gSerialMgrUseDmaHelper_d) && (gSerialMgrUseDmaHelper_d==1)
+        OSA_InterruptDisable();
+#endif
         pSer->state = 0;
+#if defined(gSerialMgrUseDmaHelper_d) && (gSerialMgrUseDmaHelper_d==1)
+        OSA_InterruptEnable();
+#endif
 #if USE_SDK_OSA
         (void)OSA_EventSet(mSMTaskEventId, gSMGR_TxNew_c);
 #endif
@@ -2003,16 +2022,12 @@ void SerialManager_RxNotify( uint32_t i )
     }
 
     /* Signal SMGR task if not already done */
-    if( !pSer->events )
+    if ( (pSer->events & gSMGR_Rx_c) == 0)
     {
         pSer->events |= gSMGR_Rx_c;
 #if USE_SDK_OSA
         (void)OSA_EventSet(mSMTaskEventId, gSMGR_Rx_c);
 #endif
-    }
-    else
-    {
-        pSer->events |= gSMGR_Rx_c;
     }
 }
 

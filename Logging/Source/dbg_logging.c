@@ -108,6 +108,22 @@ volatile int vole = 1;
 
 volatile uint32_t __dwt_count;
 
+void dump_octet_string(const char * str, const unsigned char * data, size_t len)
+{
+    for (int i = 0; i < len; i++)
+    {
+      if (i % 16 == 0)
+      {
+          if (i>0) PRINTF("\r\n");
+          PRINTF("%s[%d] %x:\t", str, i, &data[i]);
+      }
+      if (data[i] < 0x10)
+          PRINTF("0%X", data[i]);
+      else
+          PRINTF("%02X", data[i]);
+    }
+    PRINTF("\r\n");
+}
 /*******************************************************************************
  * Private functions
  *******************************************************************************/

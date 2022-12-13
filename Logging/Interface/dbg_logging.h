@@ -4,6 +4,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #if defined(__cplusplus)
 extern "C" {
@@ -25,15 +26,14 @@ void DbgLogSetWrapPrevention(bool prevent_wraplock);
 
 void DbgLogGetStartAddrAndSize(uint32_t *addr, uint32_t *sz);
 
-extern volatile uint32_t __dwt_count;
 
 #define DEBUG_DWT_CYCLE_CNT_START() \
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk; \
     DWT->CYCCNT = 0;     /* Reset cycle counter */ \
     DWT->CTRL  |= 1 ;     /* enable cycle counter */
 
-#define DEBUG_DWT_CYCLE_CNT_STOP() \
-    __dwt_count = DWT->CYCCNT;
+#define DEBUG_DWT_CYCLE_CNT_GET(_CYC_) \
+		_CYC_ = DWT->CYCCNT;
 
 #define _GET_FIRST_ARG(_1, ...) _1
 
@@ -49,6 +49,8 @@ extern volatile uint32_t __dwt_count;
                      __VA_ARGS__);               \
     } while (0)
 
+
+extern void dump_octet_string(const char * str, const unsigned char * data, size_t len);
 
 
 #if defined(__cplusplus)

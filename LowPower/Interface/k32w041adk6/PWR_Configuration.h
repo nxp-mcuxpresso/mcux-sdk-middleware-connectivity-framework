@@ -86,11 +86,15 @@
 #define gSupportBle (1)
 #endif
 
-/* 32k FRO clock: if using 32k FRO (gClkUseFro32K=1) then default to recalibrating it
- * on every wake (gClkRecalFro32K=1). If 32k FRO should only be calibrated on first
- * start, user must explicitly set gClkRecalFro32K=0 */
-#if (defined gClkUseFro32K) && (gClkUseFro32K != 0) && !(defined gClkRecalFro32K)
-#define gClkRecalFro32K (1)
+/*  Check the calibration results either at the end of the SW wakeup sequence or before going to lowpower
+    FRO32K calibration is always started on device wake up if gClkRecalFro32K is set to 1. The calibration results can be
+    retrieved
+      1 : at sofware wakeup  sequence completion, However the calibration duration (defined by FRO32K_CAL_SCALE) shall be
+          smaller and the accuracy of the measurement will be lower.
+      0 : When going to low power after active period. This allows a larger calibration duration, increasing the accuracy of the measurement
+ */
+#ifndef PWR_FRO32K_CAL_WAKEUP_END
+#define PWR_FRO32K_CAL_WAKEUP_END         0
 #endif
 
 /* Number of times the wakeup Reason is checked before proceeding on powerdown exit */

@@ -625,6 +625,14 @@ void OSA_InstallIntHandler(uint32_t IRQNumber, void (*handler)(void));
  */
 void OSA_TimeInit(void);
 
+/*!
+ * @brief Checks if current context is inside an ISR.
+ *
+ * @retval TRUE  Current context is inside an ISR.
+ * @retval FALSE Current context is not inside an ISR.
+ */
+bool_t OSA_InIsrContext(void);
+
 #ifdef  __cplusplus
 }
 #endif

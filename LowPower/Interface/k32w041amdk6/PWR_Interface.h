@@ -154,12 +154,6 @@ typedef enum {
     PWR_E_MODE_INVALID,
 } PWR_teStatus;
 
-/* @brief:  lp_32k_dyn must match the clock_32k_hk_t structure */
-typedef struct  {
-    uint32_t freq32k;          /*!< 32k clock actual calculated frequency in Hz */
-    uint32_t freq32k_16thHz;  /*!< 32k clock actual calculated frequency in 16th of Hz */
-    int32_t  ppm_32k;          /*!< the result of 32k clock software calibration in part per million */
-} PWR_clock_32k_hk_t;
 
 /*****************************************************************************
  *                        PUBLIC VARIABLES                            *
@@ -381,29 +375,6 @@ PWR_WakeupReason_t PWR_GetWakeupReason(void);
  *---------------------------------------------------------------------------*/
 void PWR_ClearWakeupReason(void);
 
-/*---------------------------------------------------------------------------
- * Name: PWR_Start32KCalibration
- * Description: -
- * Parameters: -
- * Return: -
- *---------------------------------------------------------------------------*/
-void PWR_Start32KCalibration(void);
-
-/*---------------------------------------------------------------------------
- * Name: PWR_Complete32KCalibration
- * Description: -
- * Parameters: -
- * Return: -
- *---------------------------------------------------------------------------*/
-uint32_t PWR_Complete32KCalibration(uint8_t u8Shift);
-
-/*---------------------------------------------------------------------------
- * Name: PWR_GetHk32kHandle
- * Description: return handle on 32k housekeeping structure.
- * Parameters: -
- * Return: pointer on structure
- *---------------------------------------------------------------------------*/
-extern PWR_clock_32k_hk_t *PWR_GetHk32kHandle(void);
 
 /*---------------------------------------------------------------------------
  * Name: PWR_IndicateBLEActive
