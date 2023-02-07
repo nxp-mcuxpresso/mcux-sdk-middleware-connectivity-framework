@@ -616,6 +616,15 @@ void MWS_CoexistenceEnable (void)
                 mCoexCallbacks[proto_idx](gMWS_Abort_c);
             }
         }
+        if (rf_active)
+        {
+            GpioClearPinOutput(rf_active);
+        }
+
+        if (rf_status)
+        {
+            GpioClearPinOutput(rf_status);
+        }
     }
 #endif
     mCoexEnabled = 1;

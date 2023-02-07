@@ -355,10 +355,13 @@ uint32_t NV_SafeReadFromFlash(uint8_t * ram_dst, uint8_t * flash_src, size_t siz
 void NV_FlashPerformAudit(void)
 {
     int status;
+    uint32_t chip_type = Chip_GetType();
+    uint32_t end;
 
     uint32_t addr = INT_STORAGE_START_OFFSET;
     if (INT_STORAGE_END_OFFSET == INT_STORAGE_START_OFFSET) addr++;
-    uint32_t end =  (uint32_t)0x9ddff;
+
+    end = (chip_type == CHIP_QN9030) ? 0x0004ffffU : 0x0009ddffU;
 
     uint32_t  failed_addr;
     /* The scratch area is large enough to contain 2 flash pages */

@@ -258,7 +258,16 @@ void PDM_EncryptionCallback(uint8_t *input_buffer, uint8_t **output_buffer, uint
             {
                 /* interrupt have been masked for a write, so re enable the interrut now */
                 interrupt_masked = 0;
-                OSA_InterruptEnable();
+
+                if (pdm_PortContext_p->config_flags & PDM_CNF_ENC_TMP_BUFF)
+                {
+                    /* ignore this since there is no need to decrypt back */
+                    return;
+                }
+                else
+                {
+                    OSA_InterruptEnable();
+                }
             }
             else
             {
@@ -282,8 +291,11 @@ void PDM_EncryptionCallback(uint8_t *input_buffer, uint8_t **output_buffer, uint
             }
             else
             {
-                /* encryption and write will occur in place, need to keep interrupt masked until write is completed */
-                OSA_InterruptDisable();
+                if (!(pdm_PortContext_p->config_flags & PDM_CNF_ENC_TMP_BUFF))
+                {
+                    /* encryption and write will occur in place, need to keep interrupt masked until write is completed */
+                    OSA_InterruptDisable();
+                }
                 interrupt_masked++;
             }
 
@@ -302,7 +314,7 @@ void PDM_EncryptionCallback(uint8_t *input_buffer, uint8_t **output_buffer, uint
 
         /* We will encrypt input_buffer if encryption key not NULL
             todo : support efuse key, or check with an additional field */
-        if (pdm_PortContext_p->config_flags == 1)
+        if (pdm_PortContext_p->config_flags & PDM_CNF_ENC_ENABLED)
         {
             uint32_t             pCounter_l[4];
             uint8_t             *pCounter_l_8;

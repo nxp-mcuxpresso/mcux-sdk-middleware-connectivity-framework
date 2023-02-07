@@ -106,23 +106,9 @@ while the loading of image from external EEPROM to internal Flash is in progress
 
 #if gExternalFlashIsCiphered_d /* CPU_JN8X feature */
 #define ROM_API_efuse_AESKeyPresent      THUMB_ENTRY(0x030016ec)
-#define ROM_API_aesLoadKeyFromSW         THUMB_ENTRY(0x030012a8)
-#define ROM_API_aesProcess               THUMB_ENTRY(0x030013d0)
-#define ROM_API_aesMode                  THUMB_ENTRY(0x03001210)
 
 typedef bool (*efuse_AESKeyPresent_t)(void);
 static const efuse_AESKeyPresent_t efuse_AESKeyPresent = (efuse_AESKeyPresent_t)ROM_API_efuse_AESKeyPresent;
-
-
-#if gUsePasswordCiphering_d
-static const uint32_t (*aesLoadKeyFromSW)(AES_KEY_SIZE_T keySize,
-                                          uint32_t *key)                         = ROM_API_aesLoadKeyFromSW;
-static const uint32_t (*aesMode)(AES_MODE_T modeVal,
-                                 uint32_t flags)                                 = ROM_API_aesMode;
-static const uint32_t (*aesProcess)(uint32_t *pBlockIn,
-                                    uint32_t *pBlockOut,
-                                    uint32_t numBlocks)                          = ROM_API_aesProcess;
-#endif  /* gUsePasswordCiphering_d */
 
 #endif
 #endif
@@ -211,6 +197,13 @@ typedef struct {
 ******************************************************************************/
 #if gEnableOTAServer_d || gUpgradeImageOnCurrentDevice_d
 static bool_t OtaSupportCallback(clientPacket_t* pData);
+#endif
+
+#if defined(gOTA_externalFlash_d) && (gOTA_externalFlash_d == 1)
+static otaResult_t OTA_ExtFlashImageCheck(uint32_t img_length);
+static bool OTA_AddressWithinInternalFlashSafeRange(uint32_t addr);
+static bool OTA_AddressWithinExternalFlashSafeRange(uint32_t start_addr, uint32_t end_addr);
+static uint32_t OTA_ImgDirectorySanityCheck(psector_page_data_t * page0);
 #endif
 
 static uint32_t OTA_GetMaxAllowedArchSize(void);
@@ -410,6 +403,12 @@ otaResult_t OTA_StartImageWithMaxSize(uint32_t length, uint32_t maxAllowedArchSi
             (length > maxAllowedArchSize))
             RAISE_ERROR(status, gOtaImageTooLarge_c);
 
+#if defined(gOTA_externalFlash_d) && (gOTA_externalFlash_d == 1)
+        /* Check if the ota image fits within the image directory provisioned into PSECT */
+        otaResult_t check_status = OTA_ExtFlashImageCheck(length);
+        if (gOtaSuccess_c != check_status)
+            RAISE_ERROR(status, check_status);
+#endif
         /* Save the total length of the OTA image */
         mHandle.OtaImageTotalLength = length;
         /* Init the length of the OTA image currently written */
@@ -1647,6 +1646,125 @@ static otaResult_t OTA_ReadDecipher(uint16_t NoOfBytes, uint32_t Addr, uint8_t *
 
 #endif /* CPU_JN518X */
 
+#if defined(gOTA_externalFlash_d) && (gOTA_externalFlash_d == 1)
+/*****************************************************************************
+*  OTA_ExtFlashImageCheck
+*
+*  This function checks if the incoming OTA image will fits in the image directory provisioned in PSECT.
+*  If field is not provisioned in PSECT, allow OTA for backward compatibility.
+*
+*****************************************************************************/
+static otaResult_t OTA_ExtFlashImageCheck(uint32_t img_length)
+{
+    otaResult_t res = gOtaSuccess_c;
+    psector_page_data_t * mPage0Hdl = psector_GetPage0Handle();
+    for (int i = 0; i < IMG_DIRECTORY_MAX_SIZE; i++)
+    {
+        /*  */
+        if(mPage0Hdl->page0_v3.img_directory[i].img_type == OTA_UTILS_PSECT_OTA_IMAGE_TYPE)
+        {
+            if(img_length > FLASH_PAGE_SIZE * mPage0Hdl->page0_v3.img_directory[i].img_nb_pages)
+            {
+                res = gOtaImageTooLarge_c;
+                break;
+            }
+            if(mPage0Hdl->page0_v3.img_directory[i].img_base_addr != FSL_FEATURE_SPIFI_START_ADDR + gBootData_Image_Offset_c)
+            {
+                res = gOtaInvalidParam_c;
+                break;
+            }
+        }
+    }
+    return res;
+}
+
+/*****************************************************************************
+*  OTA_AddressWithinInternalFlashSafeRange
+*
+*  This function checks if the provided address is inside the internal flash range address.
+*
+*****************************************************************************/
+static bool OTA_AddressWithinInternalFlashSafeRange(uint32_t addr)
+{
+    return (addr < (uint32_t) INT_STORAGE_START);
+}
+
+/*****************************************************************************
+*  OTA_AddressWithinExternalFlashSafeRange
+*
+*  This function checks if the provided address is inside the external flash range address.
+*
+*****************************************************************************/
+static bool OTA_AddressWithinExternalFlashSafeRange(uint32_t start_addr, uint32_t end_addr)
+{
+    return (start_addr >= (uint32_t) FSL_FEATURE_SPIFI_START_ADDR && end_addr < (FSL_FEATURE_SPIFI_START_ADDR + EEPROM_GetTotalSize()));
+}
+
+static uint32_t OTA_ImgDirectorySanityCheck(psector_page_data_t * page0)
+{
+    const image_directory_entry_t * img_directory = &page0->page0_v3.img_directory[0];
+    bool res = false;
+    uint32_t img_base, img_end;
+    for (int i = 0; i < IMG_DIRECTORY_MAX_SIZE; i++)
+    {
+        img_base = img_directory[i].img_base_addr;
+        img_end = img_base + FLASH_PAGE_SIZE * img_directory[i].img_nb_pages;
+        bool overlap = false;
+        /* Check for predefined image type used for external flash OTA */
+        if(img_directory[i].img_type == OTA_UTILS_PSECT_OTA_IMAGE_TYPE || img_directory[i].img_type == OTA_UTILS_PSECT_EXT_FLASH_TEXT_IMAGE_TYPE || img_directory[i].img_type == OTA_UTILS_PSECT_NVM_IMAGE_TYPE)
+        {
+            if (OTA_AddressWithinExternalFlashSafeRange(img_base, img_end))
+            {
+                for (int j = i+1; j < IMG_DIRECTORY_MAX_SIZE; j++ )
+                {
+                    if(img_directory[j].img_type == OTA_UTILS_PSECT_OTA_IMAGE_TYPE || img_directory[j].img_type == OTA_UTILS_PSECT_EXT_FLASH_TEXT_IMAGE_TYPE || img_directory[j].img_type == OTA_UTILS_PSECT_NVM_IMAGE_TYPE)
+                    {
+                        uint32_t other_entry_base = img_directory[j].img_base_addr;
+                        uint32_t other_entry_end = other_entry_base + FLASH_PAGE_SIZE * img_directory[j].img_nb_pages;
+                        if (((img_base < other_entry_base) && (img_end > other_entry_base)) ||
+                                ((img_base >= other_entry_base) && (img_base < other_entry_end)))
+                        {
+                            overlap = true;
+                            break;
+                        }
+                    }
+                }
+                res =  !overlap;
+            }
+            else
+            {
+                res = false;
+                break;
+            }
+        }
+        else
+        {
+            if (OTA_AddressWithinInternalFlashSafeRange(img_end))
+            {
+                for (int j = i+1; j < IMG_DIRECTORY_MAX_SIZE; j++ )
+                {
+                    uint32_t other_entry_base = img_directory[j].img_base_addr;
+                    uint32_t other_entry_end = other_entry_base + FLASH_PAGE_SIZE * img_directory[j].img_nb_pages;
+                    if (((img_base < other_entry_base) && (img_end > other_entry_base)) ||
+                            ((img_base >= other_entry_base) && (img_base < other_entry_end)))
+                    {
+                        overlap = true;
+                        break;
+                    }
+                }
+                res =  !overlap;
+            }
+            else
+            {
+                res = false;
+                break;
+            }
+        }
+    }
+    return res;
+}
+#endif
+
 /*****************************************************************************
 *  OTA_GetMaxAllowedArchSize
 *
@@ -1662,20 +1780,41 @@ static uint32_t OTA_GetMaxAllowedArchSize(void)
     return gFlashMaxStatedSize*2 - current_app_stated_size;
 #else
     /* Read the value from the psector img directory */
-    uint32_t maxImgPages = 0;
+    uint32_t maxOtaImgPages = 0;
+    uint32_t maxImgIntPages = 0;
+    uint32_t maxExtFlashTextImgPages = 0;
     uint8_t i;
     psector_page_data_t * mPage0Hdl = psector_GetPage0Handle();
     if (mPage0Hdl != NULL)
     {
+        /* If partitions overlap, disallow OTA */
+        if(!OTA_ImgDirectorySanityCheck(mPage0Hdl))
+            return 0;
+
         image_directory_entry_t * currentEntry = mPage0Hdl->page0_v3.img_directory;
         for (i=0; i<IMG_DIRECTORY_MAX_SIZE; i++)
         {
-            if (currentEntry->img_nb_pages > maxImgPages)
-                maxImgPages = currentEntry->img_nb_pages;
+            if(currentEntry->img_type == OTA_UTILS_PSECT_OTA_IMAGE_TYPE && currentEntry->img_nb_pages > maxOtaImgPages)
+                maxOtaImgPages = currentEntry->img_nb_pages;
+            else if (currentEntry->img_type == OTA_UTILS_PSECT_EXT_FLASH_TEXT_IMAGE_TYPE)
+                maxExtFlashTextImgPages  = currentEntry->img_nb_pages;
+            else if (currentEntry->img_type != OTA_UTILS_PSECT_NVM_IMAGE_TYPE &&
+                    currentEntry->img_nb_pages > maxImgIntPages)
+            {
+                maxImgIntPages = currentEntry->img_nb_pages;
+            }
             currentEntry++;
         }
     }
-    return maxImgPages*512; /* 512 corresponding to the size of one page in the internal flash */
+    if(maxOtaImgPages != 0)
+    {
+        if(maxImgIntPages + maxExtFlashTextImgPages >= maxOtaImgPages)
+            return (maxOtaImgPages)*512; /* 512 corresponding to the size of one page in the internal flash */
+        else
+            return (maxImgIntPages + maxExtFlashTextImgPages); /* Warning: Provided partitions are not coherent - Allow OTA with the minimum allowed size */
+    }
+    /* Allow OTA even if OTA partition was not provisioned in PSECT for backward compatibility */
+    return maxImgIntPages*512; /* 512 corresponding to the size of one page in the internal flash */
 #endif
 
 }
@@ -1693,7 +1832,7 @@ static void OTA_ProgressDisplay(uint32_t current_length)
 #ifdef gOTADisplayProgress_d
     #define BS 0x08
     #define SP 0x20
-	/* Display progress */
+    /* Display progress */
     uint32_t percentage =  (current_length*100 / mHandle.OtaImageTotalLength);
     static uint32_t prev_percentage = 0;
     if (current_length == 0)
@@ -1752,7 +1891,7 @@ static otaResult_t OTA_CheckVerifyFlash(uint8_t * pData, uint32_t flash_addr, ui
 
         if( !FLib_MemCmp(&pData[i], readData, readLen) )
         {
-        	OTA_DEBUG_TRACE("%s - Flash address=%x\r\n", __FUNCTION__,  flash_addr);
+            OTA_DEBUG_TRACE("%s - Flash address=%x\r\n", __FUNCTION__,  flash_addr);
             RAISE_ERROR(status, gOtaExternalFlashError_c);
         }
 
@@ -2161,7 +2300,7 @@ otaResult_t OTA_InvalidateImageHeader( bool_t bCurrentImage, uint32_t Offset )
     }
     else
     {
-    	OTA_DEBUG_TRACE("StandaloneBuffer = [");
+        OTA_DEBUG_TRACE("StandaloneBuffer = [");
         while( i < gInvalidateHeaderLength )
         {
             StandaloneBuffer[i] ^= 0xFB;

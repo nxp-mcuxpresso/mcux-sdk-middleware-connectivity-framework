@@ -12,11 +12,13 @@
 
 #include "SecLib.h"
 
-
+#if defined CORE_OPT && (CORE_OPT == m4_dspext)
+#define EC_P256_DSPEXT 1
+#else
 #ifndef EC_P256_DSPEXT
 #define EC_P256_DSPEXT 0
 #endif
-
+#endif
 /*! Type qualifier - does not affect local variables of integral type */
 #ifndef PACKED_STRUCT
 #if defined(__GNUC__)
@@ -78,7 +80,7 @@ typedef enum ecp256Status_t {
     gSecEcp256InvalidPrivateKey_c,
     gSecEcp256InvalidPoint_c,
     gSecEcp256InvalidScalar_c,
-    gSecEcp256NeutralPoint_c
+    gSecEcp256NeutralPoint_c 
 } secEcp256Status_t;
 
 typedef union big_int256_t {
@@ -125,6 +127,11 @@ typedef struct computeDhKeyParams_tag{
 } computeDhKeyParam_t;
 
 typedef void(*secLibCallback_t)(computeDhKeyParam_t* pData);
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /*! *********************************************************************************
 * \brief  This function performs initialization of the callback used to offload
@@ -731,7 +738,7 @@ void ECP256_KeyPairDeserialize
 
 void Ecdh_JacobiCompleteMult(computeDhKeyParam_t *pData);
 
-void Ecdh_ComputeJacobiChunk(int32_t index, int32_t stepSize, computeDhKeyParam_t *pData);
+void Ecdh_ComputeJacobiChunk(uint8_t index, uint8_t stepSize, computeDhKeyParam_t *pData);
 
 /************************************************************************************
  * \brief Legacy function to generate an EC P256 Key pair without DSP extension assistance.
@@ -754,5 +761,7 @@ secEcp256Status_t Ecp256_GenerateKeysSeg(computeDhKeyParam_t *pDhKeyData);
 secEcdhStatus_t Ecdh_ComputeDhKeySeg(computeDhKeyParam_t *pDhKeyData);
 
 #endif
-
+#ifdef __cplusplus
+}
+#endif
 #endif /* __SECLIB_ECP256_H__ */

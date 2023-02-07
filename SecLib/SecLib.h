@@ -222,6 +222,25 @@ void AES_128_ECB_Encrypt (const uint8_t*  pInput,
                           uint8_t*  pOutput);
 
 /*! *********************************************************************************
+ * \brief  This function performs AES-128-ECB decryption on a message block.
+ *
+ * \param[in]  pInput Pointer to the location of the input message.
+ *
+ * \param[in]  inputLen Input message length in bytes.
+ *
+ * \param[in]  pKey Pointer to the location of the 128-bit key.
+ *
+ * \param[out]  pOutput Pointer to the location to store the ciphered output.
+ *
+ * \pre All Input/Output pointers must refer to a memory address aligned to 4 bytes!
+ *
+ ********************************************************************************** */
+void AES_128_ECB_Decrypt(const uint8_t *pInput,
+                         uint32_t inputLen,
+                         const uint8_t *pKey,
+                         uint8_t *pOutput);
+
+/*! *********************************************************************************
 * \brief  This function performs AES-128-CBC encryption on a message block.
 *         This function only accepts input lengths which are multiple
 *         of 16 bytes (AES 128 block size).
@@ -365,10 +384,10 @@ void AES_128_CMAC_LsbFirstInput (const uint8_t*   pInput,
 * \param[out]  pOutput Pointer to the location to store the 16-byte pseudo random variable.
 *
 ********************************************************************************** */
-void AES_CMAC_PRF_128 (uint8_t* pInput,
-                       uint32_t inputLen,
-                       uint8_t* pVarKey,
-                       uint32_t varKeyLen,
+void AES_CMAC_PRF_128 (const uint8_t* pInput,
+                       const uint32_t inputLen,
+                       const uint8_t* pVarKey,
+                       const uint32_t varKeyLen,
                        uint8_t* pOutput);
 
 /*! *********************************************************************************
@@ -464,13 +483,13 @@ secResultType_t AES_128_EAX_Decrypt (uint8_t*   pInput,
 * \param[out]  flags       Select encrypt/decrypt operations (gSecLib_CCM_Encrypt_c, gSecLib_CCM_Decrypt_c)
 *
 ********************************************************************************** */
-uint8_t AES_128_CCM (uint8_t*   pInput,
-                     uint16_t   inputLen,
-                     uint8_t*   pAuthData,
-                     uint16_t   authDataLen,
-                     uint8_t*   pNonce,
-                     uint8_t    nonceSize,
-                     uint8_t*   pKey,
+uint8_t AES_128_CCM (const uint8_t*   pInput,
+                     const uint16_t   inputLen,
+                     const uint8_t*   pAuthData,
+                     const uint16_t   authDataLen,
+                     const uint8_t*   pNonce,
+                     const uint8_t    nonceSize,
+                     const uint8_t*   pKey,
                      uint8_t*   pOutput,
                      uint8_t*   pCbcMac,
                      uint8_t    macSize,

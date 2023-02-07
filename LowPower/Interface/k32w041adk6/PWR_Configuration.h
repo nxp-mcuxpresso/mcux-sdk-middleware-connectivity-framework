@@ -103,7 +103,11 @@
 #endif
 
 #ifndef gPWR_BleLL_EarlyEnterDsm
+#if !defined(DUAL_MODE_APP) && (defined(gSupportBle) && (gSupportBle == 1))
+#define gPWR_BleLL_EarlyEnterDsm     1
+#else
 #define gPWR_BleLL_EarlyEnterDsm     0
+#endif
 #endif
 
 #ifndef gPWR_LpEntryStructOptim

@@ -109,6 +109,9 @@ extern void ResetMCU(void);
 #include "fsl_debug_console.h"
 #endif
 
+#ifndef cPWR_AllowLowPowerWithoutTimer
+#define cPWR_AllowLowPowerWithoutTimer    (0)
+#endif
 
 /*****************************************************************************
  *                               PUBLIC VARIABLES                            *
@@ -921,7 +924,10 @@ static int PWR_CheckSocTimers(void)
              * MCUZIGBEE-2469: However, checking for a running wake timer 1 in
              * OSC ON mode is not necessary or desirable when BLE is running,
              * as it sleeps with the 32k OSC ON but no wake timer.
+             * MCB-2887: Moreover, checking for a running wake timer 1 in
+             * OSC ON mode is not necessary or desirable in some applications (no Zigbee and no BLE)
              */
+#if !cPWR_AllowLowPowerWithoutTimer
             if ( (FALSE == bBLE_Active)
                 && (0 != (PWR_GetDeepSleepConfig() & PWR_CFG_OSC_ON))
                 && (InterruptStatus[1] != WTIMER_STATUS_RUNNING)
@@ -930,6 +936,7 @@ static int PWR_CheckSocTimers(void)
                 reason_debug = -5;
                 break;
             }
+#endif
         }
         if  (0 != (SYSCON->AHBCLKCTRLS[0] & SYSCON_AHBCLKCTRL0_RTC_MASK))
         {

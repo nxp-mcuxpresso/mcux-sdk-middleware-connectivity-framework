@@ -25,11 +25,15 @@
 #include "fsl_os_abstraction.h"
 #include "Panic.h"
 #include <stddef.h>
-#ifdef NCCL_DEBUG
+#if defined NCCL_DEBUG
 #include "dbg_logging.h"
 #endif
 #include "rom_aes.h"
 
+/* Define gSecLibAESHwUsedFromIsr in app_preinclude.h if AES HW may be invoked from ISR */
+#ifndef gSecLibAESHwUsedFromIsr
+#define gSecLibAESHwUsedFromIsr 0
+#endif
 extern void dump_octet_string(const char * str, const unsigned char * data, size_t len);
 
 #if defined FSL_FEATURE_SOC_AES_COUNT &&  (FSL_FEATURE_SOC_AES_COUNT > 0)
@@ -101,6 +105,16 @@ extern void dump_octet_string(const char * str, const unsigned char * data, size
 * Private macros
 *************************************************************************************
 ********************************************************************************** */
+#if (!(defined(__CORTEX_M)) || (defined(__CORTEX_M) ))
+#if defined(__GNUC__)
+#define HAL_REV32(x) __builtin_bswap32(x)
+#elif defined(__IAR_SYSTEMS_ICC__) || defined(__CC_ARM)
+#define HAL_REV32(x) __REV(x)
+#endif
+#else
+#define HAL_REV32(x) (((x & 0x000000ffu)<<24)|((x & 0x0000ff00u)<< 8)|((x & 0x00ff0000u)>>8)|((x& 0xff000000u)>>24))
+#endif
+
 /* AES constants */
 #define AES128 128
 #define AES128_ROUNDS 10
@@ -111,7 +125,6 @@ extern void dump_octet_string(const char * str, const unsigned char * data, size
 #define AES256 256
 #define AES256_ROUNDS 14
 
-#define AES_BLOCK_SIZE     16 /* [bytes] */
 
 #if (cPWR_UsePowerDownMode)
     #define SecLib_DisallowToSleep() PWR_DisallowDeviceToSleep()
@@ -273,9 +286,10 @@ uint8_t force_sw_aes_execution_cnt = 0;
 /* Pointer to the software context which currently uses hardware SHA256.*/
 static void* sHwSha256Context = NULL;
 
+#if defined gSecLibAESHwUsedFromIsr && (gSecLibAESHwUsedFromIsr != 0)
 /* Flag to signal an ISR used hardware AES for encrypt/decrypt. */
 static volatile bool_t bHasIsrInterrupted = false;
-
+#endif
 /* AES_128_ProcessBlocks can use efuseLoadUniqueKey and aesLoadKeyFromOTP to load
  * the secret key in hardware AES module. */
 static const efuse_LoadUniqueKey_t efuseLoadUniqueKey = (efuse_LoadUniqueKey_t)(0x030016f4 | 1);
@@ -283,6 +297,33 @@ static const aesLoadKeyFromOTP_t aesLoadKeyFromOTP = (aesLoadKeyFromOTP_t)(0x030
 
 static uint32_t u32Reverse(uint32_t u32InWord);
 
+#if defined gSecLibAESMethodSelectionDynHwSw_c &&  (gSecLibAESMethodSelectionDynHwSw_c != 0)
+static void sw_aes_cbc_decrypt(const uint8_t* pInput,
+                               uint32_t inputLen,
+                               const uint8_t* pInitVector,
+                               const uint8_t* pKey,
+                               uint8_t* pOutput);
+
+static void sw_aes_cbc_encrypt(const uint8_t* pInput,
+                               uint32_t inputLen,
+                               const uint8_t* pInitVector,
+                               const uint8_t* pKey,
+                               uint8_t* pOutput);
+static void sw_aes_ctr( const uint8_t* pInput,
+                        uint32_t inputLen,
+                        uint8_t* pCounter,
+                        const uint8_t* pKey,
+                        uint8_t* pOutput);
+static void sw_aes_cipher(bool cipher_noDecipher,
+                          const uint8_t*  pInput,
+                          uint32_t inputLen,
+                          const uint8_t* pKey,
+                          uint8_t* pOutput);
+static status_t k32w0_hw_aes128_block_decrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput);
+static status_t k32w0_hw_aes128_block_encrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput);
+static status_t k32w0_aes_block_decrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput);
+static status_t k32w0_aes_block_encrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput);
+#endif
 /*! *********************************************************************************
 *************************************************************************************
 * Public prototypes
@@ -292,7 +333,7 @@ static uint32_t u32Reverse(uint32_t u32InWord);
 
 /* AES function - SW emulated*/
 void sw_Aes128(const uint8_t *pData, const uint8_t *pKey, uint8_t enc, uint8_t *pReturnData);
-uint8_t sw_AES128_CCM(uint8_t* pInput,   uint16_t inputLen,
+uint8_t sw_AES128_CCM(uint8_t* pInput,    uint16_t inputLen,
                       uint8_t* pAuthData, uint16_t authDataLen,
                       uint8_t* pNonce,    uint8_t  nonceSize,
                       uint8_t* pKey,      uint8_t* pOutput,
@@ -330,9 +371,13 @@ static void SecLib_LeftShiftOneBit(uint8_t *input, uint8_t *output);
 static void SecLib_Padding(const uint8_t *lastb, uint8_t *pad, uint32_t length);
 static void SecLib_Xor128(const uint8_t *a, const uint8_t *b, uint8_t *out);
 
-#if (!LTC_HW_ACC && !FSL_FEATURE_SOC_AES_HW && !(JN_AES_HW_ACC && !gSecLibAESMethodSelectionDynHwSw_c))
+
+#if (!LTC_HW_ACC && !FSL_FEATURE_SOC_AES_HW && !(JN_AES_HW_ACC && !gSecLibAESMethodSelectionDynHwSw_c && !gSecLibAESHwUsedFromIsr))
 static void AES_128_IncrementCounter(uint8_t* ctr);
 #endif
+
+static status_t k32w0_hw_aes_load_key(const uint8_t* pKey, size_t keyBitSize);
+
 
 
 #if FSL_FEATURE_SOC_AES_HW
@@ -420,6 +465,313 @@ bool_t  SecLib_AES_Is_HW_Accelerator_disabled(void)
 }
 #endif
 
+#if !defined gSecLibAESHwUsedFromIsr || (gSecLibAESHwUsedFromIsr ==  0)
+/*
+ * gSecLibAESHwUsedFromIsr : if set the AES HW may be requested from an ISR context.
+ *
+ *  CBC and CTR operations can only be done in a semi-automatic way using
+ *  the AES HW to perform ECB block by block only.
+ *  Likewise AES ECB mode can only be done block by block.
+ *  This mode implies that AES HW is mandated so it excludes the Dynamic switching becasue
+ *  the AES HW is mandated for performance reasons..
+ */
+
+
+static status_t k32w0_hw_aes_cbc_encrypt(const uint8_t* pInput,
+                              const uint32_t inputLen,
+                              const uint8_t* pInitVector,
+                              const uint8_t* pKey,
+                              uint8_t* pOutput)
+{
+    status_t st;
+    SecLib_DisallowToSleep();
+    SECLIB_AES_MUTEX_LOCK();
+    do {
+        st = k32w0_hw_aes_load_key(pKey, 128u);
+        if (st != kStatus_Success)
+            break;
+        st = AES_EncryptCbc(AES0, pInput, pOutput, inputLen, pInitVector);
+    } while (false);
+    SECLIB_AES_MUTEX_UNLOCK();
+    SecLib_AllowToSleep();
+    return st;
+}
+
+static status_t k32w0_hw_aes_cbc_decrypt(const uint8_t* pInput,
+                        uint32_t inputLen,
+                        const uint8_t* pInitVector,
+                        const uint8_t* pKey,
+                        uint8_t* pOutput)
+{
+    status_t st;
+    SecLib_DisallowToSleep();
+    SECLIB_AES_MUTEX_LOCK();
+    do {
+        st = k32w0_hw_aes_load_key(pKey, 128u);
+        if (st != kStatus_Success)
+            break;
+        st = AES_DecryptCbc(AES0, pInput, pOutput, inputLen, pInitVector);
+    } while (false);
+    SECLIB_AES_MUTEX_UNLOCK();
+    SecLib_AllowToSleep();
+    return st;
+}
+
+
+static status_t k32w0_hw_aes_ctr_crypt(const uint8_t* pInput,
+                     const uint32_t inputLen,
+                     uint8_t* pCounter,
+                     const uint8_t* pKey,
+                     uint8_t* pOutput)
+{
+    status_t st;
+    SecLib_DisallowToSleep();
+    SECLIB_AES_MUTEX_LOCK();
+    do {
+        st = k32w0_hw_aes_load_key(pKey, 128u);
+        if (st != kStatus_Success)
+            break;
+        st = AES_CryptCtr(AES0, pInput, pOutput, inputLen, pCounter, NULL, NULL);
+    } while (false);
+    SECLIB_AES_MUTEX_UNLOCK();
+    SecLib_AllowToSleep();
+    return st;
+}
+
+static status_t k32w0_hw_aes_ecb_encrypt(const uint8_t* pInput,
+        const uint32_t inputLen,
+        const uint8_t* pKey,
+        uint8_t* pOutput)
+{
+    status_t st;
+
+    SecLib_DisallowToSleep();
+    SECLIB_AES_MUTEX_LOCK();
+
+    do {
+        st = k32w0_hw_aes_load_key(pKey, 128u);
+        if (st != kStatus_Success)
+        {
+            break;
+        }
+        st = AES_EncryptEcb(AES0, pInput, pOutput, inputLen);
+
+    } while(false);
+
+    SECLIB_AES_MUTEX_UNLOCK();
+    SecLib_AllowToSleep();
+
+    return st;
+}
+
+static status_t k32w0_hw_aes_ecb_decrypt(const uint8_t* pInput,
+        const uint32_t inputLen,
+        const uint8_t* pKey,
+        uint8_t* pOutput)
+{
+    status_t st;
+
+    SecLib_DisallowToSleep();
+    SECLIB_AES_MUTEX_LOCK();
+    do {
+        st = k32w0_hw_aes_load_key(pKey, 128u);
+        if (st != kStatus_Success)
+        {
+            break;
+        }
+        st = AES_DecryptEcb(AES0, pInput, pOutput, inputLen);
+    } while(false);
+
+    SECLIB_AES_MUTEX_UNLOCK();
+    SecLib_AllowToSleep();
+
+    return st;
+
+}
+
+
+#if (gSecLibAESMethodSelectionDynHwSw_c > 0)
+
+static status_t k32w0_aes_ecb_encrypt(const uint8_t*  pInput, uint32_t inputLen, const uint8_t* pKey, uint8_t* pOutput)
+{
+    status_t st;
+    do {
+        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        {
+            st = k32w0_hw_aes_ecb_encrypt(pInput, inputLen, pKey, pOutput);
+            break;
+        }
+        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */
+        if (pKey == NULL)
+        {
+            st = kStatus_InvalidArgument;
+            break;
+        }
+        sw_aes_cipher(true, pInput, inputLen, pKey, pOutput);
+        st = kStatus_Success;
+    } while (false);
+    return st;
+}
+static status_t k32w0_aes_ecb_decrypt(const uint8_t*  pInput, uint32_t inputLen, const uint8_t* pKey, uint8_t* pOutput)
+{
+    status_t st;
+    do {
+        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        {
+            st = k32w0_hw_aes_ecb_decrypt(pInput, inputLen, pKey, pOutput);
+            break;
+        }
+        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */
+        if (pKey == NULL)
+        {
+            st = kStatus_InvalidArgument;
+            break;
+        }
+        sw_aes_cipher(false, pInput, inputLen, pKey, pOutput);
+        st = kStatus_Success;
+    } while (false);
+    return st;
+}
+
+static status_t k32w0_aes_cbc_encrypt(const uint8_t* pInput,
+                           uint32_t inputLen,
+                           const uint8_t* pInitVector,
+                           const uint8_t* pKey,
+                           uint8_t* pOutput)
+{
+    status_t st;
+    do {
+        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        {
+            st = k32w0_hw_aes_cbc_encrypt(pInput, inputLen, pInitVector, pKey, pOutput);
+            break;
+        }
+        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */        if (pKey == NULL)
+        {
+            st = kStatus_InvalidArgument;
+            break;
+        }
+        sw_aes_cbc_encrypt(pInput, inputLen, pInitVector, pKey, pOutput);
+        st = kStatus_Success;
+    } while (false);
+    return st;
+}
+
+static status_t k32w0_aes_cbc_decrypt(const uint8_t* pInput,
+                           uint32_t inputLen,
+                           const uint8_t* pInitVector,
+                           const uint8_t* pKey,
+                           uint8_t* pOutput)
+{
+    status_t st;
+    do {
+        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        {
+            st = k32w0_hw_aes_cbc_decrypt(pInput, inputLen, pInitVector, pKey, pOutput);
+            break;
+        }
+        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */
+        if (pKey == NULL)
+        {
+            st = kStatus_InvalidArgument;
+            break;
+        }
+        sw_aes_cbc_decrypt(pInput, inputLen, pInitVector, pKey, pOutput);
+        st = kStatus_Success;
+    } while (false);
+    return st;
+}
+
+static status_t k32w0_aes_ctr_crypt(const uint8_t* pInput,
+                           const uint32_t inputLen,
+                           uint8_t* pCounter,
+                           const uint8_t* pKey,
+                           uint8_t* pOutput)
+{
+    status_t st;
+    do {
+        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        {
+            st = k32w0_hw_aes_ctr_crypt(pInput, inputLen, pCounter, pKey, pOutput);
+            break;
+        }
+        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */
+        if (pKey == NULL)
+        {
+            st = kStatus_InvalidArgument;
+            break;
+        }
+        sw_aes_ctr(pInput, inputLen, pCounter, pKey, pOutput);
+        st = kStatus_Success;
+    } while (false);
+    return st;
+}
+
+
+#else
+
+#define k32w0_aes_cbc_encrypt   k32w0_hw_aes_cbc_encrypt
+#define k32w0_aes_cbc_decrypt   k32w0_hw_aes_cbc_decrypt
+#define k32w0_aes_ctr_crypt     k32w0_hw_aes_ctr_crypt
+#define k32w0_aes_ecb_encrypt   k32w0_hw_aes_ecb_encrypt
+#define k32w0_aes_ecb_decrypt   k32w0_hw_aes_ecb_decrypt
+
+#endif  /* (gSecLibAESMethodSelectionDynHwSw_c > 0) */
+
+
+#endif /* !(gSecLibAESHwUsedFromIsr > 0) */
+
+/* AES 128 block crypto */
+#if defined gSecLibAESMethodSelectionDynHwSw_c &&  (gSecLibAESMethodSelectionDynHwSw_c != 0)
+
+static status_t k32w0_aes_block_decrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput)
+{
+    status_t st = kStatus_Success;
+    do {
+        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        {
+            st = k32w0_hw_aes128_block_decrypt(pInput, pKey, pOutput);
+            break;
+        }
+        if (pKey == NULL)
+        {
+            st = kStatus_InvalidArgument;
+            break;
+        }
+        sw_Aes128((uint8_t*)pInput, (uint8_t*)pKey, 0, pOutput);
+        st = kStatus_Success;
+    } while (false);
+    return st;
+}
+
+static status_t k32w0_aes_block_encrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput)
+{
+    status_t st = kStatus_Success;
+
+    do {
+        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        {
+            st = k32w0_hw_aes128_block_encrypt(pInput, pKey, pOutput);
+            break;
+        }
+        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */        if (pKey == NULL)
+        {
+            st = kStatus_InvalidArgument;
+            break;
+        }
+        sw_Aes128((uint8_t*)pInput, (uint8_t*)pKey, 1, pOutput);
+        st = kStatus_Success;
+    } while (false);
+    return st;
+
+}
+#else /* gSecLibAESMethodSelectionDynHwSw_c */
+#define k32w0_aes_block_encrypt k32w0_hw_aes128_block_encrypt
+#define k32w0_aes_block_decrypt k32w0_hw_aes128_block_decrypt
+#endif /* gSecLibAESMethodSelectionDynHwSw_c */
+
+
+
 /*! *********************************************************************************
 * \brief  Set AES Key in AES HW Accelerator.
 *
@@ -430,7 +782,7 @@ bool_t  SecLib_AES_Is_HW_Accelerator_disabled(void)
 * \pre All Input/Output pointers must refer to a memory address alligned to 4 bytes!
 *
 ********************************************************************************** */
-static status_t hw_aes_load_key(const uint8_t* pKey, size_t keyBitSize)
+static status_t k32w0_hw_aes_load_key(const uint8_t* pKey, size_t keyBitSize)
 {
     status_t st;
     size_t keySize = (keyBitSize >> 3); /* Byte size */
@@ -454,161 +806,125 @@ static status_t hw_aes_load_key(const uint8_t* pKey, size_t keyBitSize)
     }
     return st;
 }
+
 /*! *********************************************************************************
-* \brief  Launch HW AES ECB encryption operation 
+* \brief  Launch HW AES 128  ECB encryption operation over a single block :
+*         length is implicitly 16 bytes
 *
 * \param[in]  pInput Pointer on input plaintext 
-* \param[in]  inputLen Length of input plaintext in number of bytes 
 * \param[in]  pKey pointer on key - Length of key is implicitly 128 bit
-*             may be NULL if emaning to use EFUSE secret key
+*             may be NULL if meaning to use EFUSE secret key
 * \param[out] pointer on output ciphertext buffer.
-* 
+*
+* Note: An operation may be interrupted by an ISR requesting the AES HW too.
+* If so a global volatile variable is set so that the caller from the non ISR context
+* can resume the operation that got cancelled as the ISR stole the resource.
 *
 ********************************************************************************** */
-static status_t hw_aes_encrypt(const uint8_t *pInput, const size_t inputLen, const uint8_t *pKey, uint8_t * pOutput)
+static status_t k32w0_hw_aes128_block_encrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput)
 {
     status_t st;
-
+#if defined gSecLibAESHwUsedFromIsr && (gSecLibAESHwUsedFromIsr != 0)
     do {
+
         if (OSA_InIsrContext())
         {
-            st = hw_aes_load_key(pKey, 128u);
+            st = k32w0_hw_aes_load_key(pKey, 128u);
             if (st != kStatus_Success)
             {
                 break;
             }
             st = AES_EncryptEcb(AES0, pInput, pOutput, AES_BLOCK_SIZE);
-            if (st != kStatus_Success)
-            {
-                break;
-            }
             bHasIsrInterrupted = true;
         }
         else
         {
+            SECLIB_AES_MUTEX_LOCK();
             do
             {
-                SECLIB_AES_MUTEX_LOCK();
                 bHasIsrInterrupted = false;
-                st = hw_aes_load_key(pKey, 128u);
+                st = k32w0_hw_aes_load_key(pKey, 128u);
                 if (st != kStatus_Success)
                 {
                     break;
                 }
                 st = AES_EncryptEcb(AES0, pInput, pOutput, AES_BLOCK_SIZE);
-                if (st != kStatus_Success)
-                {
-                    break;
-                }
-                SECLIB_AES_MUTEX_UNLOCK();
             } while (bHasIsrInterrupted);
+            SECLIB_AES_MUTEX_UNLOCK();
         }
     } while(false);
+
+#else
+    SECLIB_AES_MUTEX_LOCK();
+    do {
+
+        st = k32w0_hw_aes_load_key(pKey, 128u);
+        if (st != kStatus_Success)
+        {
+            break;
+        }
+        st = AES_EncryptEcb(AES0, pInput, pOutput, AES_BLOCK_SIZE);
+
+    } while(false);
+    SECLIB_AES_MUTEX_UNLOCK();
+
+#endif
+
     return st;
 }
 
 
-/*! *********************************************************************************
-* \brief  Launch HW AES ECB decryption operation 
-*
-* \param[in]  pInput Pointer on input ciphertext octet string
-* \param[in]  inputLen Length of input ciphertext in number of bytes 
-* \param[in]  pKey pointer on key - Length of key is implicitly 128 bit
-*             may be NULL if emaning to use EFUSE secret key
-* \param[out] pointer on output plaintext buffer.
-* 
-*
-********************************************************************************** */
-static status_t hw_aes_decrypt(const uint8_t *pInput, const size_t inputLen, const uint8_t *pKey, uint8_t * pOutput)
+static status_t k32w0_hw_aes128_block_decrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput)
 {
     status_t st;
 
+#if defined gSecLibAESHwUsedFromIsr && (gSecLibAESHwUsedFromIsr != 0)
     do {
-      if (OSA_InIsrContext())
-      {
-          st = hw_aes_load_key(pKey, 128u);
-          if (st != kStatus_Success)
-          {
-              break;
-          }
-          st = AES_DecryptEcb(AES0, pInput, pOutput, AES_BLOCK_SIZE);
-          if (st != kStatus_Success)
-          {
-              break;
-          }
-          bHasIsrInterrupted = true;
-      }
-      else
-      {
-        do
+        if (OSA_InIsrContext())
         {
-            SECLIB_AES_MUTEX_LOCK();
-            bHasIsrInterrupted = false;
-            st = hw_aes_load_key(pKey, 128u);
+            st = k32w0_hw_aes_load_key(pKey, 128u);
             if (st != kStatus_Success)
             {
                 break;
             }
             st = AES_DecryptEcb(AES0, pInput, pOutput, AES_BLOCK_SIZE);
-            if (st != kStatus_Success)
+            bHasIsrInterrupted = true;
+        }
+        else
+
+        {
+            SECLIB_AES_MUTEX_LOCK();
+            do
             {
-                break;
-            }
+                bHasIsrInterrupted = false;
+                st = k32w0_hw_aes_load_key(pKey, 128u);
+                if (st != kStatus_Success)
+                {
+                    break;
+                }
+                st = AES_DecryptEcb(AES0, pInput, pOutput, AES_BLOCK_SIZE);
+            } while (bHasIsrInterrupted);
             SECLIB_AES_MUTEX_UNLOCK();
-        } while (bHasIsrInterrupted);
-      }
+        }
     } while(false);
-    return st;
-}
 
-static status_t k32w0_aes_block_decrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput)
-{
-    status_t st = kStatus_Success;
-    do {
-#if (gSecLibAESMethodSelectionDynHwSw_c > 0)
-        if (!SecLib_AES_Is_HW_Accelerator_disabled())
-        {
-            st = hw_aes_decrypt(pInput, AES_BLOCK_SIZE, pKey, pOutput);
-            break;
-        }
-        if (pKey == NULL)
-        {
-            st = kStatus_InvalidArgument;
-            break;
-        }
-        sw_Aes128((uint8_t*)pInput, (uint8_t*)pKey, 0, pOutput);
-        st = kStatus_Success;
 #else
-        st = hw_aes_decrypt(pInput, AES_BLOCK_SIZE, pKey, pOutput);
-#endif
-    } while (false);
-    return st;
-}
-
-status_t  k32w0_aes_block_encrypt(const uint8_t *pInput, const uint8_t *pKey, uint8_t * pOutput)
-{
-    status_t st = kStatus_Success;
+    SECLIB_AES_MUTEX_LOCK();
     do {
-#if (gSecLibAESMethodSelectionDynHwSw_c > 0)
-        if (!SecLib_AES_Is_HW_Accelerator_disabled())
+        st = k32w0_hw_aes_load_key(pKey, 128u);
+        if (st != kStatus_Success)
         {
-            st = hw_aes_encrypt(pInput, AES_BLOCK_SIZE, pKey, pOutput);
             break;
         }
-        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */        if (pKey == NULL)
-        {
-            st = kStatus_InvalidArgument;
-            break;
-        }
-        sw_Aes128((uint8_t*)pInput, (uint8_t*)pKey, 1, pOutput);
-        st = kStatus_Success;
-#else
-        st = hw_aes_encrypt(pInput, AES_BLOCK_SIZE, pKey, pOutput);
+        st = AES_DecryptEcb(AES0, pInput, pOutput, AES_BLOCK_SIZE);
+    } while(false);
+    SECLIB_AES_MUTEX_UNLOCK();
 #endif
-    } while (false);
     return st;
-
 }
+
+
+
 
 /*! *********************************************************************************
 * \brief  Process current AES operation described by the context.
@@ -628,30 +944,30 @@ uint32_t AES_128_ProcessBlocks(const void* pContext,
                                uint32_t  numBlocks)
 {
     ErrorCode_t status = 0;
+
     const aesContext_t* context = (const aesContext_t*)pContext;
-    do
+    while (numBlocks > 0)
     {
-        SECLIB_AES_MUTEX_LOCK();
-        bHasIsrInterrupted = false;
-        if (context->pSoftwareKey)
+        status_t st;
+        if (context->mode == AES_MODE_ECB_DECRYPT)
         {
-            status = aesLoadKeyFromSW((AES_KEY_SIZE_T)context->keySize, context->pSoftwareKey);
+            st = k32w0_hw_aes128_block_decrypt((const uint8_t *)pBlockIn, (const uint8_t*)context->pSoftwareKey, (uint8_t *)pBlockOut);
         }
         else
         {
-            efuseLoadUniqueKey();
-            aesLoadKeyFromOTP((AES_KEY_SIZE_T)context->keySize);
+            st = k32w0_hw_aes128_block_encrypt((const uint8_t *)pBlockIn, (const uint8_t*)context->pSoftwareKey, (uint8_t *)pBlockOut);
         }
-        status = aesMode((AES_MODE_T)context->mode, context->flags);
-        status = aesProcess(pBlockIn, pBlockOut, numBlocks);
-        SECLIB_AES_MUTEX_UNLOCK();
-    } while (bHasIsrInterrupted);
-
+        if (st != kStatus_Success)
+            break;
+        numBlocks--;
+        pBlockIn += (AES_BLOCK_SIZE/sizeof(uint32_t));
+        pBlockOut += (AES_BLOCK_SIZE/sizeof(uint32_t));
+    }
     return (uint32_t)status;
 }
 
 /*! *********************************************************************************
-* \brief  This function performs AES-128 encryption on a 16-byte block.
+* \brief  This function performs AES-128 encryption on one 16-byte AES block.
 *
 * \param[in]  pInput Pointer to the location of the 16-byte plain text block.
 *
@@ -844,14 +1160,21 @@ void AES_128_Decrypt(const uint8_t* pInput,
 
 
 
-#if (gSecLibAESMethodSelectionDynHwSw_c > 0)
+#if (gSecLibAESMethodSelectionDynHwSw_c > 0) || (gSecLibAESHwUsedFromIsr > 0)
 
-static void sw_aes_encrypt(const uint8_t*  pInput, uint32_t inputLen, const uint8_t* pKey, uint8_t* pOutput)
+static void sw_aes_cipher(bool cipher_noDecipher,
+                          const uint8_t* pInput,
+                          uint32_t inputLen,
+                          const uint8_t* pKey,
+                          uint8_t* pOutput)
 {
     /* If remaining data bigger than one AES block size */
     while( inputLen > AES_BLOCK_SIZE )
     {
-        sw_Aes128(pInput, pKey, 1, pOutput);
+        if (cipher_noDecipher)
+            AES_128_Encrypt(pInput, pKey, pOutput);
+        else
+            AES_128_Decrypt(pInput, pKey, pOutput);
         pInput += AES_BLOCK_SIZE;
         pOutput += AES_BLOCK_SIZE;
         inputLen -= AES_BLOCK_SIZE;
@@ -863,36 +1186,15 @@ static void sw_aes_encrypt(const uint8_t*  pInput, uint32_t inputLen, const uint
         uint8_t tempBuffIn[AES_BLOCK_SIZE] = {0};
         uint8_t tempBuffOut[AES_BLOCK_SIZE] = {0};
         FLib_MemCpy(tempBuffIn, pInput, inputLen);
-        sw_Aes128(tempBuffIn, pKey, 1, tempBuffOut);
+           if (cipher_noDecipher)
+               AES_128_Encrypt(tempBuffIn, pKey, tempBuffOut);
+           else
+               AES_128_Decrypt(tempBuffIn, pKey, tempBuffOut);
         FLib_MemCpy(pOutput, tempBuffOut, inputLen);
     }
 }
-
 #endif
 
-static status_t k32w0_aes_encrypt(const uint8_t*  pInput, uint32_t inputLen, const uint8_t* pKey, uint8_t* pOutput)
-{
-    status_t st;
-    do {
-#if (gSecLibAESMethodSelectionDynHwSw_c > 0)
-        if (!SecLib_AES_Is_HW_Accelerator_disabled())
-        {
-            st = hw_aes_encrypt(pInput, inputLen, pKey, pOutput);
-            break;
-        }
-        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */        if (pKey == NULL)
-        {
-            st = kStatus_InvalidArgument;
-            break;
-        }
-        sw_aes_encrypt(pInput, inputLen, pKey, pOutput);
-        st = kStatus_Success;
-#else // (gAESMethodSelection == gAESMethodSelectionHw)
-        st = hw_aes_encrypt(pInput, inputLen, pKey, pOutput);
-#endif
-    } while (false);
-    return st;
-}
 
 
 
@@ -915,8 +1217,8 @@ void AES_128_ECB_Encrypt(const uint8_t* pInput,
                          const uint8_t* pKey,
                          uint8_t* pOutput)
 {
-#if JN_AES_HW_ACC
-    k32w0_aes_encrypt(pInput, inputLen, pKey, pOutput);
+#if JN_AES_HW_ACC && !(gSecLibAESHwUsedFromIsr > 0)
+    k32w0_aes_ecb_encrypt(pInput, inputLen, pKey, pOutput);
 #elif FSL_FEATURE_SOC_AES_HW  /* HW AES */
     AES_param_t pAES;
 
@@ -935,7 +1237,47 @@ void AES_128_ECB_Encrypt(const uint8_t* pInput,
     AES_128_ECB_Enc_HW(&pAES);
   #endif /* USE_TASK_FOR_HW_AES */
 #else /* SW AES */
-    sw_aes_encrypt(pInput, inputLen, pKey, pOutput);
+    sw_aes_cipher(true, pInput, inputLen, pKey, pOutput);
+#endif
+}
+
+/*! *********************************************************************************
+ * \brief  This function performs AES-128-ECB decryption on a message block.
+ *
+ * \param[in]  pInput Pointer to the location of the input message.
+ *
+ * \param[in]  inputLen Input message length in bytes.
+ *
+ * \param[in]  pKey Pointer to the location of the 128-bit key.
+ *
+ * \param[out]  pOutput Pointer to the location to store the ciphered output.
+ *
+ * \pre All Input/Output pointers must refer to a memory address aligned to 4 bytes!
+ *
+ ********************************************************************************** */
+void AES_128_ECB_Decrypt(const uint8_t *pInput, uint32_t inputLen, const uint8_t *pKey, uint8_t *pOutput)
+{
+#if JN_AES_HW_ACC && !(gSecLibAESHwUsedFromIsr > 0)
+    k32w0_aes_ecb_decrypt(pInput, inputLen, pKey, pOutput);
+#elif FSL_FEATURE_SOC_AES_HW  /* HW AES */
+    AES_param_t pAES;
+
+    pAES.CTR_counter = NULL;
+    pAES.Key         = pKey;
+    pAES.Len         = inputLen;
+    pAES.pCipher     = pInput;
+    pAES.pInitVector = NULL;
+    pAES.pPlain      = pOutput;
+    pAES.Blocks      = 0;
+    #if (defined(USE_TASK_FOR_HW_AES) && (USE_TASK_FOR_HW_AES > 0))
+    AESM_InitType(&AES128ECB_Dec_Id, gAESMGR_ECB_Dec_c);
+    AESM_SetParam(AES128ECB_Dec_Id, pAES, AES_128_ECB_Dec_HW);
+    AESM_Start(AES128ECB_Dec_Id);
+    #else
+    AES_128_ECB_Dec_HW(&pAES);
+    #endif /* USE_TASK_FOR_HW_AES */
+#else /* SW AES */
+    sw_aes_cipher(false, pInput, inputLen, pKey, pOutput);
 #endif
 }
 
@@ -950,7 +1292,7 @@ void AES_128_ECB_Encrypt(const uint8_t* pInput,
 *
 * \param[out]  pOutput Pointer to the location to store the ciphered output.
 *
-* \pre All Input/Output pointers must refer to a memory address alligned to 4 bytes!
+* \pre All Input/Output pointers must refer to a memory address aligned to 4 bytes!
 *
 ********************************************************************************** */
 void AES_128_ECB_Block_Encrypt(uint8_t* pInput,
@@ -986,7 +1328,7 @@ void AES_128_ECB_Block_Encrypt(uint8_t* pInput,
 #endif /* FSL_FEATURE_SOC_AES_HW */
 }
 
-#if (gSecLibAESMethodSelectionDynHwSw_c > 0)
+#if (gSecLibAESMethodSelectionDynHwSw_c > 0) || (gSecLibAESHwUsedFromIsr > 0)
 static void sw_aes_cbc_encrypt(const uint8_t* pInput,
                                uint32_t inputLen,
                                const uint8_t* pInitVector,
@@ -994,7 +1336,7 @@ static void sw_aes_cbc_encrypt(const uint8_t* pInput,
                                uint8_t* pOutput)
 {
 
-    static uint8_t tempBuffIn[AES_BLOCK_SIZE] = {0};
+    uint8_t tempBuffIn[AES_BLOCK_SIZE] = {0};
     uint8_t tempBuffOut[AES_BLOCK_SIZE] = {0};
 
     if( pInitVector != NULL )
@@ -1020,54 +1362,8 @@ static void sw_aes_cbc_encrypt(const uint8_t* pInput,
 }
 #endif
 
-static status_t hw_aes_cbc_encrypt(const uint8_t* pInput,
-                              const uint32_t inputLen,
-                              const uint8_t* pInitVector,
-                              const uint8_t* pKey,
-                              uint8_t* pOutput)
-{
-    status_t st;
-    SecLib_DisallowToSleep();
-    SECLIB_AES_MUTEX_LOCK();
-    do {
-        st = hw_aes_load_key(pKey, 128u);
-        if (st != kStatus_Success)
-            break;
-        st = AES_EncryptCbc(AES0, pInput, pOutput, inputLen, pInitVector);
-    } while (false);
-    SECLIB_AES_MUTEX_UNLOCK();
-    SecLib_AllowToSleep();
-    return st;
-}
 
-static status_t k32w0_aes_cbc_encrypt(const uint8_t* pInput,
-                           uint32_t inputLen,
-                           const uint8_t* pInitVector,
-                           const uint8_t* pKey,
-                           uint8_t* pOutput)
-{
-    status_t st;
-    do {
-#if (gSecLibAESMethodSelectionDynHwSw_c > 0)
-        if (!SecLib_AES_Is_HW_Accelerator_disabled())
-        {
-            st = hw_aes_cbc_encrypt(pInput, inputLen, pInitVector, pKey, pOutput);
-            break;
-        }
-        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */        if (pKey == NULL)
-        {
-            st = kStatus_InvalidArgument;
-            break;
-        }
-        sw_aes_cbc_encrypt(pInput, inputLen, pInitVector, pKey, pOutput);
-        st = kStatus_Success;
-#else
-        st = hw_aes_cbc_encrypt(pInput, inputLen, pInitVector, pKey, pOutput);
-#endif
-    } while (false);
-    return st;
 
-}
 /*! *********************************************************************************
 * \brief  This function performs AES-128-CBC encryption on a message block.
 *         This function accepts arbitrary (non-multiple of AES block size) length data
@@ -1100,7 +1396,7 @@ void AES_128_CBC_Encrypt(const uint8_t* pInput,
     SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
 
-#elif JN_AES_HW_ACC
+#elif JN_AES_HW_ACC && ! (gSecLibAESHwUsedFromIsr > 0)
     k32w0_aes_cbc_encrypt(pInput,
                           inputLen,
                           pInitVector,
@@ -1115,7 +1411,7 @@ void AES_128_CBC_Encrypt(const uint8_t* pInput,
 
 /*! *********************************************************************************
 * \brief  This function performs AES-128-CBC encryption on a message block after
-*padding it with 1 bit of 1 and 0 bits trail.
+* padding it with 1 bit of 1 and 0 bits trail.
 *
 * \param[in]  pInput Pointer to the location of the input message.
 *
@@ -1159,7 +1455,7 @@ uint32_t AES_128_CBC_Encrypt_And_Pad(uint8_t* pInput,
     LTC_AES_EncryptCbc(LTC0, pInput, pOutput, newLen, pInitVector, pKey, AES_BLOCK_SIZE);
     SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
-#elif JN_AES_HW_ACC
+#elif JN_AES_HW_ACC && !(gSecLibAESHwUsedFromIsr > 0)
     k32w0_aes_cbc_encrypt(pInput, newLen, pInitVector, pKey, pOutput);
 #else
     sw_aes_cbc_encrypt(pInput, newLen, pInitVector, pKey, pOutput);
@@ -1167,7 +1463,7 @@ uint32_t AES_128_CBC_Encrypt_And_Pad(uint8_t* pInput,
     return newLen;
 }
 
-#if (gSecLibAESMethodSelectionDynHwSw_c > 0)
+#if (gSecLibAESMethodSelectionDynHwSw_c > 0) || (gSecLibAESHwUsedFromIsr > 0)
 
 static void sw_aes_cbc_decrypt(const uint8_t* pInput,
                                uint32_t inputLen,
@@ -1175,7 +1471,7 @@ static void sw_aes_cbc_decrypt(const uint8_t* pInput,
                                const uint8_t* pKey,
                                uint8_t* pOutput)
 {
-    static uint8_t temp[2*AES_BLOCK_SIZE] = {0};
+    uint8_t temp[2*AES_BLOCK_SIZE] = {0};
 
     if(pInitVector != NULL)
     {
@@ -1202,57 +1498,8 @@ static void sw_aes_cbc_decrypt(const uint8_t* pInput,
     }
 }
 #endif
-static status_t hw_aes_cbc_decrypt(const uint8_t* pInput,
-                        uint32_t inputLen,
-                        const uint8_t* pInitVector,
-                        const uint8_t* pKey,
-                        uint8_t* pOutput)
-{
-    status_t st;
 
-    SecLib_DisallowToSleep();
-    SECLIB_AES_MUTEX_LOCK();
-    do {
-        st = hw_aes_load_key(pKey, 128u);
-        if (st != kStatus_Success)
-            break;
-        st = AES_DecryptCbc(AES0, pInput, pOutput, inputLen, pInitVector);
-        if (st != kStatus_Success)
-            break;
-    } while (false);
-    SECLIB_AES_MUTEX_UNLOCK();
-    SecLib_AllowToSleep();
-    return st;
-}
 
-static status_t k32w0_aes_cbc_decrypt(const uint8_t* pInput,
-                           uint32_t inputLen,
-                           const uint8_t* pInitVector,
-                           const uint8_t* pKey,
-                           uint8_t* pOutput)
-{
-    status_t st;
-    do {
-#if (gSecLibAESMethodSelectionDynHwSw_c > 0)
-        if (!SecLib_AES_Is_HW_Accelerator_disabled())
-        {
-            st = hw_aes_cbc_decrypt(pInput, inputLen, pInitVector, pKey, pOutput);
-            break;
-        }
-        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */
-        if (pKey == NULL)
-        {
-            st = kStatus_InvalidArgument;
-            break;
-        }
-        sw_aes_cbc_decrypt(pInput, inputLen, pInitVector, pKey, pOutput);
-        st = kStatus_Success;
-#else
-        st = hw_aes_cbc_decrypt(pInput, inputLen, pInitVector, pKey, pOutput);
-#endif
-    } while (false);
-    return st;
-}
 
 /*! *********************************************************************************
 * \brief  This function performs AES-128-CBC decryption on a message block.
@@ -1289,7 +1536,7 @@ uint32_t AES_128_CBC_Decrypt_And_Depad(const uint8_t* pInput,
     SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
 
-#elif JN_AES_HW_ACC
+#elif JN_AES_HW_ACC && ! (gSecLibAESHwUsedFromIsr > 0)
     k32w0_aes_cbc_decrypt(pInput, inputLen, pInitVector, pKey, pOutput);
 #else
     sw_aes_cbc_decrypt(pInput, inputLen, pInitVector, pKey, pOutput);
@@ -1299,7 +1546,7 @@ uint32_t AES_128_CBC_Decrypt_And_Depad(const uint8_t* pInput,
     return newLen;
 }
 
-#if (gSecLibAESMethodSelectionDynHwSw_c > 0)
+#if (gSecLibAESMethodSelectionDynHwSw_c > 0) || (gSecLibAESHwUsedFromIsr > 0)
 static void sw_aes_ctr( const uint8_t* pInput,
                         uint32_t inputLen,
                         uint8_t* pCounter,
@@ -1333,56 +1580,6 @@ static void sw_aes_ctr( const uint8_t* pInput,
 
 
 
-static status_t hw_aes_ctr_crypt(const uint8_t* pInput,
-                     const uint32_t inputLen,
-                     uint8_t* pCounter,
-                     const uint8_t* pKey,
-                     uint8_t* pOutput)
-{
-    status_t st;
-    SecLib_DisallowToSleep();
-    SECLIB_AES_MUTEX_LOCK();
-    do {
-        st = hw_aes_load_key(pKey, 128u);
-        if (st != kStatus_Success)
-            break;
-        st = AES_CryptCtr(AES0, pInput, pOutput, inputLen, pCounter, NULL, NULL);
-        if (st != kStatus_Success)
-            break;
-    } while (false);
-    SECLIB_AES_MUTEX_UNLOCK();
-    SecLib_AllowToSleep();
-    return st;
-}
-
-static status_t k32w0_aes_ctr_crypt(const uint8_t* pInput,
-                           const uint32_t inputLen,
-                           uint8_t* pCounter,
-                           const uint8_t* pKey,
-                           uint8_t* pOutput)
-{
-    status_t st;
-    do {
-#if  (gSecLibAESMethodSelectionDynHwSw_c > 0)
-        if (!SecLib_AES_Is_HW_Accelerator_disabled())
-        {
-            st = hw_aes_ctr_crypt(pInput, inputLen, pCounter, pKey, pOutput);
-            break;
-        }
-        /* If we reach here HW accelerator is disabled so no NULL pKey can be accepted */
-        if (pKey == NULL)
-        {
-            st = kStatus_InvalidArgument;
-            break;
-        }
-        sw_aes_ctr(pInput, inputLen, pCounter, pKey, pOutput);
-        st = kStatus_Success;
-#else
-        st = hw_aes_ctr_crypt(pInput, inputLen, pCounter, pKey, pOutput);
-#endif
-    } while (false);
-    return st;
-}
 
 /*! *********************************************************************************
 * \brief  This function performs AES-128-CTR encryption on a message block.
@@ -1428,7 +1625,7 @@ void AES_128_CTR(const uint8_t* pInput,
     SECLIB_AES_MUTEX_UNLOCK();
     SecLib_AllowToSleep();
 
-#elif JN_AES_HW_ACC
+#elif JN_AES_HW_ACC && !(gSecLibAESHwUsedFromIsr > 0)
     k32w0_aes_ctr_crypt(pInput, inputLen, pCounter, pKey, pOutput);
 #else
     sw_aes_ctr( pInput, inputLen, pCounter, pKey, pOutput);
@@ -1647,15 +1844,14 @@ void AES_128_CMAC_LsbFirstInput (const uint8_t* pInput,
 * \param[out]  pOutput Pointer to the location to store the 16-byte pseudo random variable.
 *
 ********************************************************************************** */
-void AES_CMAC_PRF_128(uint8_t* pInput,
-                      uint32_t inputLen,
-                      uint8_t* pVarKey,
-                      uint32_t varKeyLen,
+void AES_CMAC_PRF_128(const uint8_t* pInput,
+                      const uint32_t inputLen,
+                      const uint8_t* pVarKey,
+                      const uint32_t varKeyLen,
                       uint8_t* pOutput)
 {
     uint8_t  K[16];  /*!< Temporary key location to be used if the key length is not 16 bytes. */
-    uint8_t* pCmacKey = pVarKey; /*!<  Pointer to the key used by the CMAC operation which generates the
-                                  *    output. */
+    const uint8_t* pCmacKey = pVarKey; /*!<  Pointer to the key used by the CMAC operation which generates the output. */
     if (varKeyLen)
     {
         if (varKeyLen != AES_BLOCK_SIZE)
@@ -1670,7 +1866,7 @@ void AES_CMAC_PRF_128(uint8_t* pInput,
         }
 
         /*! Perform the CMAC operation which generates the output using the local
-        *  key pointer whcih will be set to the initial key or the generated one. */
+        *  key pointer which will be set to the initial key or the generated one. */
         AES_128_CMAC(pInput, inputLen, pCmacKey, pOutput);
     }
 }
@@ -1887,7 +2083,7 @@ secResultType_t AES_128_EAX_Decrypt(uint8_t* pInput,
 * \param[in]  pKey         Pointer to the location of the 128-bit key.
 *
 * \param[out]  pOutput     Pointer to the location to store the plaintext data when decrypting.
-*                          Pointer to the location to store the cyphertext data when encrypting.
+*                          Pointer to the location to store the ciphertext data when encrypting.
 *
 * \param[out]  pCbcMac     Pointer to the location to store the Message Authentication Code (MAC) when encrypting.
 *                          Pointer to the location where the received MAC can be found when decrypting.
@@ -1896,18 +2092,18 @@ secResultType_t AES_128_EAX_Decrypt(uint8_t* pInput,
 *
 * \param[out]  flags       Select encrypt/decrypt operations (gSecLib_CCM_Encrypt_c, gSecLib_CCM_Decrypt_c)
 *
-* \return 0 if encryption/decryption was successfull; otherwise, error code for failed encryption/decryption
+* \return 0 if encryption/decryption was successful; otherwise, error code for failed encryption/decryption
 *
 * \remarks At decryption, MIC fail is also signaled by returning a non-zero value.
 *
 ********************************************************************************** */
-uint8_t AES_128_CCM(uint8_t* pInput,
-                    uint16_t inputLen,
-                    uint8_t* pAuthData,
-                    uint16_t authDataLen,
-                    uint8_t* pNonce,
-                    uint8_t  nonceSize,
-                    uint8_t* pKey,
+uint8_t AES_128_CCM(const uint8_t* pInput,
+                    const uint16_t inputLen,
+                    const uint8_t* pAuthData,
+                    const uint16_t authDataLen,
+                    const uint8_t* pNonce,
+                    const uint8_t  nonceSize,
+                    const uint8_t* pKey,
                     uint8_t* pOutput,
                     uint8_t* pCbcMac,
                     uint8_t  macSize,
@@ -1929,7 +2125,10 @@ uint8_t AES_128_CCM(uint8_t* pInput,
     }
 
 #else
-        status = sw_AES128_CCM(pInput, inputLen, pAuthData, authDataLen, pNonce, nonceSize, pKey, pOutput, pCbcMac, macSize, flags);
+        status = sw_AES128_CCM((uint8_t*)pInput, (uint16_t)inputLen,
+                               (uint8_t*)pAuthData, (uint16_t)authDataLen,
+                               (uint8_t*)pNonce, (uint16_t)nonceSize,
+                               (uint8_t*)pKey, pOutput, pCbcMac, macSize, flags);
 #endif
 
     SECLIB_AES_MUTEX_UNLOCK();
@@ -1968,7 +2167,7 @@ void SecLib_XorN(uint8_t* pDst,
 *************************************************************************************
 ********************************************************************************** */
 
-#if (!LTC_HW_ACC && !FSL_FEATURE_SOC_AES_HW && !(JN_AES_HW_ACC && !gSecLibAESMethodSelectionDynHwSw_c))
+#if (!LTC_HW_ACC && !FSL_FEATURE_SOC_AES_HW && !(JN_AES_HW_ACC && !gSecLibAESMethodSelectionDynHwSw_c && !gSecLibAESHwUsedFromIsr))
 /*! *********************************************************************************
 * \brief  Increments the value of a given counter vector.
 *
@@ -1980,25 +2179,14 @@ void SecLib_XorN(uint8_t* pDst,
 static void AES_128_IncrementCounter(uint8_t* ctr)
 {
     uint32_t i;
-    uint64_t tempLow;
-    uuint128_t tempCtr;
-
-    for(i=0;i<AES_BLOCK_SIZE;i++)
+    for (i = 0; i < 4; i++)
     {
-        tempCtr.u8[AES_BLOCK_SIZE-i-1] = ctr[i];
-    }
-
-    tempLow = tempCtr.u64[0];
-    tempCtr.u64[0]++;
-
-    if(tempLow > tempCtr.u64[0])
-    {
-        tempCtr.u64[1]++;
-    }
-
-    for(i=0;i<AES_BLOCK_SIZE;i++)
-    {
-        ctr[i] = tempCtr.u8[AES_BLOCK_SIZE-i-1];
+        uint32_t * pWrd = (uint32_t*)&ctr[12-4*i];
+        uint32_t wrd = HAL_REV32(*pWrd);
+        wrd ++;
+        *pWrd = HAL_REV32(wrd);
+        if (wrd != 0)
+            break;
     }
 }
 #endif /* !(FSL_FEATURE_SOC_LTC_COUNT || FSL_FEATURE_SOC_AES_COUNT) */
@@ -3225,7 +3413,7 @@ static uint32_t u32Reverse(uint32_t u32InWord)
 void vSwipeEndian(AESSW_Block_u *puBlock, tsReg128 *psReg, bool_t bBlockToReg)
 {
     int i=0;
-    for (i =0;i< (AESSW_BLK_SIZE/4);i++)
+    for (i =0;i< (AES_BLOCK_SIZE/4);i++)
     {
         if(bBlockToReg)
             ((uint32_t*)psReg)[i] = u32Reverse((uint32_t)(puBlock->au32[i]));

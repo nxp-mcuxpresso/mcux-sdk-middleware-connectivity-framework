@@ -112,6 +112,10 @@ extern "C" {
 #define __PDM_WEAK_FUNC __weak
 #endif
 
+#define PDM_CNF_ENC_ENABLED  0x1     /* enable encryption */
+#define PDM_CNF_ENC_TMP_BUFF 0x2     /* input buffer is temporary, no need
+                                        to protect it or use staging buffer */
+
 /****************************************************************************/
 /***        Type Definitions                                              ***/
 /****************************************************************************/
@@ -239,7 +243,7 @@ typedef struct {
     uint8_t  *pStaging_buf;      /*!< staging buffer to encrypt the data from application before writing to FLash */
     uint32_t  staging_buf_size;  /*!< staging buffer size */
     uint32_t* pEncryptionKey;    /*!< if encryption is enabled, Address to save the Software encryption key, otherwise use the efuse key. */
-    uint8_t   config_flags;      /*!< 0 : Encryption disabled, 1 encryption enabled */
+    uint8_t   config_flags;      /*!< bit0: 0 : Encryption disabled, 1 encryption enabled */
 } PDM_portConfig_t;
 
 /****************************************************************************/

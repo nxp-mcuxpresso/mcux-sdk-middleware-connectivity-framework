@@ -58,8 +58,13 @@ extern "C" {
 #define PWR_BOD_WAKEUP        ( 1 << 24 ) /** wakeup from Brown-Out Detect interrupt */
 
 /* Basic MACROs that provide estimated time to enter and exit lowpower */
+#ifndef PWR_SYSTEM_EXIT_LOW_POWER_DURATION_MS
 #define PWR_SYSTEM_EXIT_LOW_POWER_DURATION_MS       2
+#endif
+
+#ifndef PWR_SYSTEM_ENTER_LOW_POWER_DURATION_MS
 #define PWR_SYSTEM_ENTER_LOW_POWER_DURATION_MS      2
+#endif
 
 /*****************************************************************************
  *                        PUBLIC TYPE DEFINITIONS                            *

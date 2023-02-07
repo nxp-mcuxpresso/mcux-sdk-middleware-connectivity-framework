@@ -1710,11 +1710,21 @@ void tickless_PostProcessing(tmrlp_tickless_systick_t * p_lp_ctx)
     SYSTICK_DBG_LOG("sleep_duration = %d", sleep_duration_32k_ticks);
 
     tick_jump_diff = p_lp_ctx->rtosSystickExpectedIdleTime - p_lp_ctx->idle_tick_jump;
-    /* Acceptable tick diff +1 */
+
+    /* The system wakes up a bit in advance (can happen in case the carry is quite big),  consider this is the right time */
     if (tick_jump_diff == 1)
     {
         p_lp_ctx->idle_tick_jump = p_lp_ctx->rtosSystickExpectedIdleTime;
         SYSTICK_DBG_LOG("warning tick_jump_diff = %d", tick_jump_diff);
+    }
+
+    /* For unknown reason (probably the system took too much time to wakeup, this is pretty unpredictable as it depends on the
+        application), we are too late. In this scenarion, consider the sleep duration is the expected Idle time. This has the drawback to
+        lead to a systick timebase shift compared to a reference clock , so should be avoided as much as possible */
+    if (tick_jump_diff < 0)
+    {
+        p_lp_ctx->idle_tick_jump = p_lp_ctx->rtosSystickExpectedIdleTime;
+        SYSTICK_DBG_LOG("Error tick_jump_diff = %d", tick_jump_diff);
     }
 
     /* Update the OS time ticks. */
