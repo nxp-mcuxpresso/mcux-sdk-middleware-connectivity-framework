@@ -1,5 +1,5 @@
 /* -------------------------------------------------------------------------- */
-/*                           Copyright 2021-2022 NXP                          */
+/*                           Copyright 2021-2023 NXP                          */
 /*                            All rights reserved.                            */
 /*                    SPDX-License-Identifier: BSD-3-Clause                   */
 /* -------------------------------------------------------------------------- */
@@ -13,6 +13,7 @@
 #include "fwk_platform_hdlc.h"
 #include "fsl_component_serial_manager.h"
 #include "board.h"
+#include "fwk_platform_coex.h"
 
 /* -------------------------------------------------------------------------- */
 /*                               Private macros                               */
@@ -35,14 +36,6 @@
 #ifndef SPINEL_UART_CLOCK_RATE
 #define SPINEL_UART_CLOCK_RATE BOARD_BT_UART_CLK_FREQ
 #endif
-
-#if (defined(HAL_UART_DMA_ENABLE) && (HAL_UART_DMA_ENABLE > 0U) && (SPINEL_ENABLE_TX_RTS > 0U) && \
-     (SPINEL_ENABLE_RX_RTS > 0U))
-#error "DMA on UART with flow control not required"
-#endif
-
-#define LPUART_TX_DMA_CHANNEL 0U
-#define LPUART_RX_DMA_CHANNEL 1U
 
 #define SPINEL_HDLC_MALLOC pvPortMalloc
 #define SPINEL_HDLC_FREE   vPortFree
@@ -70,32 +63,6 @@ static platform_hdlc_rx_callback_t hdlcRxCallback;
 static void *                      callbackParam = NULL;
 
 #if (defined(HAL_UART_DMA_ENABLE) && (HAL_UART_DMA_ENABLE > 0U))
-#if (defined(FSL_FEATURE_SOC_DMAMUX_COUNT) && (FSL_FEATURE_SOC_DMAMUX_COUNT > 0U))
-static const dma_mux_configure_t dma_mux = {
-    .dma_dmamux_configure =
-        {
-            .dma_mux_instance = 0,
-            .rx_request       = kDmaRequestMuxLPUART8Rx,
-            .tx_request       = kDmaRequestMuxLPUART8Tx,
-        },
-};
-#endif
-#endif
-
-#if (defined(HAL_UART_DMA_ENABLE) && (HAL_UART_DMA_ENABLE > 0U))
-#if (defined(FSL_FEATURE_EDMA_HAS_CHANNEL_MUX) && (FSL_FEATURE_EDMA_HAS_CHANNEL_MUX > 0U))
-static const dma_mux_configure_t dma_channel_mux = {
-    .dma_dmamux_configure =
-        {
-            .dma_mux_instance   = 0,
-            .dma_tx_channel_mux = kDmaRequestMuxLPUART8Rx,
-            .dma_rx_channel_mux = kDmaRequestMuxLPUART8Tx,
-        },
-};
-#endif
-#endif
-
-#if (defined(HAL_UART_DMA_ENABLE) && (HAL_UART_DMA_ENABLE > 0U))
 static serial_port_uart_dma_config_t uartConfig = {
 #else
 static serial_port_uart_config_t uartConfig = {
@@ -110,40 +77,23 @@ static serial_port_uart_config_t uartConfig = {
     .instance        = SPINEL_UART_INSTANCE,
     .txFifoWatermark = 0,
     .rxFifoWatermark = 0,
-#if (defined(HAL_UART_DMA_ENABLE) && (HAL_UART_DMA_ENABLE > 0U))
-    .dma_instance = 0,
-    .rx_channel   = LPUART_RX_DMA_CHANNEL,
-    .tx_channel   = LPUART_TX_DMA_CHANNEL,
-#if (defined(FSL_FEATURE_SOC_DMAMUX_COUNT) && (FSL_FEATURE_SOC_DMAMUX_COUNT > 0U))
-    .dma_mux_configure = &dma_mux,
-#else
-    .dma_mux_configure         = NULL,
-#endif
-#if (defined(FSL_FEATURE_EDMA_HAS_CHANNEL_MUX) && (FSL_FEATURE_EDMA_HAS_CHANNEL_MUX > 0U))
-    .dma_channel_mux_configure = &dma_channel_mux,
-#else
-    .dma_channel_mux_configure = NULL,
-#endif
-#endif
 };
 
 static const serial_manager_config_t serialManagerConfig = {
     .ringBuffer     = &s_ringBuffer[0],
     .ringBufferSize = sizeof(s_ringBuffer),
-#if (defined(HAL_UART_DMA_ENABLE) && (HAL_UART_DMA_ENABLE > 0U))
-    .type = kSerialPort_UartDma,
-#else
-    .type = kSerialPort_Uart,
-#endif
-    .blockType  = kSerialManager_NonBlocking,
-    .portConfig = (serial_port_uart_config_t *)&uartConfig,
+    .type           = kSerialPort_Uart,
+    .blockType      = kSerialManager_NonBlocking,
+    .portConfig     = (serial_port_uart_config_t *)&uartConfig,
 };
+
+static bool hdlcUartInitialized = false;
 
 /* -------------------------------------------------------------------------- */
 /*                             Private prototypes                             */
 /* -------------------------------------------------------------------------- */
 
-static int  PLATFORM_InitHdlcUart(void);
+int         PLATFORM_InitHdlcUart(void);
 static int  PLATFORM_TerminateHdlcUart(void);
 static void PLATFORM_HdlcSerialManagerTxCallback(void *                             pData,
                                                  serial_manager_callback_message_t *message,
@@ -163,12 +113,28 @@ int PLATFORM_InitHdlcInterface(platform_hdlc_rx_callback_t callback, void *param
     hdlcRxCallback = callback;
     callbackParam  = param;
 
-    /* Init UART interface */
-    if (PLATFORM_InitHdlcUart() != 0)
+    do
+    {
+        /* Init controllers
+         *  The hdlc interface will be initialized at the end of the controller initialization
+         *  and before doing a reset.
+         */
+        if (PLATFORM_InitControllers(conn802_15_4_c) != 0)
+        {
+            ret = -1;
+            break;
+        }
+        if (PLATFORM_InitHdlcUart() != 0)
+        {
+            ret = -1;
+            break;
+        }
+    } while (0);
+
+    if (ret < 0)
     {
         hdlcRxCallback = NULL;
         callbackParam  = NULL;
-        ret            = -1;
     }
 
     return ret;
@@ -249,11 +215,7 @@ int PLATFORM_SendHdlcMessage(uint8_t *msg, uint32_t len)
     return ret;
 }
 
-/* -------------------------------------------------------------------------- */
-/*                              Private functions                             */
-/* -------------------------------------------------------------------------- */
-
-static int PLATFORM_InitHdlcUart(void)
+int PLATFORM_InitHdlcUart(void)
 {
     serial_manager_status_t status;
     int                     ret = 0;
@@ -265,6 +227,8 @@ static int PLATFORM_InitHdlcUart(void)
     OSA_InterruptDisable();
     do
     {
+        if (hdlcUartInitialized)
+            break;
         /* Retrieve the UART clock rate at runtime as it can depend on clock config */
         uartConfig.clockRate = SPINEL_UART_CLOCK_RATE;
 
@@ -290,12 +254,17 @@ static int PLATFORM_InitHdlcUart(void)
             ret = -3;
             break;
         }
+        hdlcUartInitialized = true;
     } while (0);
     OSA_InterruptEnable();
     assert(status == kStatus_SerialManager_Success);
 
     return ret;
 }
+
+/* -------------------------------------------------------------------------- */
+/*                              Private functions                             */
+/* -------------------------------------------------------------------------- */
 
 static int PLATFORM_TerminateHdlcUart(void)
 {
@@ -304,6 +273,8 @@ static int PLATFORM_TerminateHdlcUart(void)
 
     do
     {
+        if (!hdlcUartInitialized)
+            break;
         status = SerialManager_CloseReadHandle((serial_read_handle_t)otTransceiverSerialReadHandle);
         if (status != kStatus_SerialManager_Success)
         {
@@ -317,6 +288,7 @@ static int PLATFORM_TerminateHdlcUart(void)
             ret = -2;
             break;
         }
+        hdlcUartInitialized = false;
     } while (0);
 
     return ret;

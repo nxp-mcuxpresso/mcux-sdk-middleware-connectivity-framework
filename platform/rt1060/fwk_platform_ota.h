@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 NXP
+ * Copyright 2022-2023 NXP
  * All rights reserved.
  *
  * SPDX-License-Identifier: BSD-3-Clause
@@ -8,7 +8,6 @@
 #ifndef __FWK_PLATFORM_OTA_H__
 #define __FWK_PLATFORM_OTA_H__
 
-#include "OtaPrivate.h"
 #include "fsl_common.h"
 
 typedef struct

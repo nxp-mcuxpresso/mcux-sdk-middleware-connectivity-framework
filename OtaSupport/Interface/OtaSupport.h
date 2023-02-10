@@ -21,6 +21,21 @@ extern "C" {
 #include "fwk_platform.h"
 #include "fsl_component_generic_list.h"
 
+/*!
+ * @addtogroup OTA_module
+ * The OTA_module
+ *
+ * OTA_module provides APIs a collection of over the air update features.
+ * @{
+ */
+/*!
+ * @addtogroup OTA_support
+ * The OTA main module
+ *
+ * OTA_support provides APIs a collection of over the air update features.
+ * @{
+ */
+
 /************************************************************************************
 *************************************************************************************
 * Public macros
@@ -164,7 +179,7 @@ otaResult_t OTA_PullImageChunk(uint8_t *pData, uint16_t length, uint32_t *pImage
  * \brief  Finishes the writing of a new image to the permanent storage.
  *         It will write the image header (signature and length) and footer (sector copy bitmap).
  *
- * \param[in] bitmap   pointer to a byte array indicating the sector erase pattern for the
+ * \param[in] pBitmap  pointer to a byte array indicating the sector erase pattern for the
  *                     internal FLASH before the image update.
  *
  * \return
@@ -214,7 +229,7 @@ otaResult_t OTA_WriteStorageMemory(uint8_t *pData, uint16_t length, uint32_t add
  * \brief  Compute CRC over a data chunk.
  *
  * \param[in] pData        pointer to the data chunk
- * \param[in] length       the length of the data chunk
+ * \param[in] lenData      the length of the data chunk
  * \param[in] crcValueOld  current CRC value
  *
  * \return  computed CRC.
@@ -317,8 +332,23 @@ otaResult_t OTA_MakeHeadRoomForNextBlock(uint32_t size, ota_op_completion_cb_t c
  ********************************************************************************** */
 uint32_t OTA_GetSelectedFlashAvailableSpace(void);
 
+/*! *********************************************************************************
+ * \brief  Return if there is a pending
+ *
+ * \return  bool pending transaction or not.
+ *
+ ********************************************************************************** */
+bool OTA_IsTransactionPending(void);
+
 #ifdef __cplusplus
 }
 #endif
+
+/*!
+ * @}  end of OTA_support addtogroup
+ */
+/*!
+ * @}  end of OTA_module addtogroup
+ */
 
 #endif /* _OTA_SUPPORT_H_ */

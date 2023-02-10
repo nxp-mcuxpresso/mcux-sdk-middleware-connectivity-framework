@@ -237,7 +237,7 @@ uint32_t FLib_StrLen(const char *str);
  *         ((n-1) - i) in the same buffer (and vice versa).
  *         Used for endianess conversion of octet strigs.
  *
- * \param[out] pBuf    Pointer to destination memory block to be byte reversed.
+ * \param[out] buf     Pointer to destination memory block to be byte reversed.
  * \param[in]  cBytes  Number of bytes to copy
  *
  * \remarks
@@ -257,9 +257,9 @@ void FLib_ReverseByteOrderInPlace(void *buf, uint32_t cBytes);
  *       to 32bits
  *
  ********************************************************************************** */
-static inline void FLib_MemCpyWord(uint32_t *pDst, void *pSrc)
+static inline void FLib_MemCpyWord(void *pDst, void *pSrc)
 {
-    *pDst = *((uint32_t *)pSrc);
+    *((uint32_t *)pDst) = *((uint32_t *)pSrc);
 }
 /*!
  * @}  end of FunctionLib addtogroup

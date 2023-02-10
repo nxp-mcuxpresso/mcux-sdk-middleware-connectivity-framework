@@ -1,5 +1,5 @@
 /* -------------------------------------------------------------------------- */
-/*                           Copyright 2022 NXP                               */
+/*                           Copyright 2022-2023 NXP                               */
 /*                            All rights reserved.                            */
 /*                    SPDX-License-Identifier: BSD-3-Clause                   */
 /* -------------------------------------------------------------------------- */
@@ -9,23 +9,28 @@
 /* -------------------------------------------------------------------------- */
 
 #include <stdint.h>
+#include "fwk_platform_coex.h"
 #include "fsl_adapter_gpio.h"
-#include "fsl_os_abstraction.h"
+#include "fsl_common.h"
+#include "wifi-decl.h"
+#include "sduart_nw61x.h"
+#include "firmware_dnld.h"
+#include "sdio.h"
 
 /* -------------------------------------------------------------------------- */
 /*                               Private macros                               */
 /* -------------------------------------------------------------------------- */
 #ifndef PLATFORM_CONFIG_DEFAULT_RESET_DELAY_MS
 // Default delay after R̅E̅S̅E̅T̅ assertion, in miliseconds.
-#define PLATFORM_CONFIG_DEFAULT_RESET_DELAY_MS 3000
+#define PLATFORM_CONFIG_DEFAULT_RESET_DELAY_MS 200
 #endif
 
-#ifndef RESET_PIN_PORT
-#define RESET_PIN_PORT 6
+#ifndef PLATFORM_RESET_PIN_PORT
+#define PLATFORM_RESET_PIN_PORT 3
 #endif
 
-#ifndef RESET_PIN_NUM
-#define RESET_PIN_NUM 2
+#ifndef PLATFORM_RESET_PIN_NUM
+#define PLATFORM_RESET_PIN_NUM 9
 #endif
 /* -------------------------------------------------------------------------- */
 /*                                Private types                               */
@@ -40,8 +45,8 @@ static GPIO_HANDLE_DEFINE(otGpioResetHandle);
 static const hal_gpio_pin_config_t resetPinConfig = {
     .direction = kHAL_GpioDirectionOut,
     .level     = 0U,
-    .port      = RESET_PIN_PORT,
-    .pin       = RESET_PIN_NUM,
+    .port      = PLATFORM_RESET_PIN_PORT,
+    .pin       = PLATFORM_RESET_PIN_NUM,
 };
 
 static bool isOtControllerUp = false;
@@ -84,11 +89,18 @@ int PLATFORM_InitControllers(uint8_t controllersMask)
                 break;
             }
 
+            /* Download firmware */
+            ret = sdio_init();
+            assert(WM_SUCCESS == ret);
+            ret = sdio_ioport_init();
+            assert(WM_SUCCESS == ret);
+            ret = firmware_download(wlan_fw_bin, wlan_fw_bin_len);
+            assert(WM_SUCCESS == ret);
+
             /* Waiting for the RCP chip starts up */
             OSA_TimeDelay(PLATFORM_CONFIG_DEFAULT_RESET_DELAY_MS);
 
             isOtControllerUp = true;
-
         } while (0);
     }
 
@@ -113,7 +125,7 @@ static int PLATFORM_ResetController(void)
             break;
         }
 
-        OSA_TimeDelay(200);
+        OSA_TimeDelay(PLATFORM_CONFIG_DEFAULT_RESET_DELAY_MS);
 
         // Set Reset pin to high level.
         status = HAL_GpioSetOutput((hal_gpio_handle_t)otGpioResetHandle, 1);

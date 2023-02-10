@@ -1,8 +1,8 @@
 Release Name: MCUXpresso Software Development Kit (SDK) Framework Middleware
-Release Version: 6.0.12
+Release Version: 6.1.0
 Package License: LA_OPT_NXP_Software_License.htm - Additional Distribution License, Section 2.3 applies  
 
-FWK                        version: 6.0.12                               
+FWK                        version: 6.1.0                               
                            Location: /           
                            Description: Connectivity Framework middleware for
                            Connectivity stacks                               

@@ -82,11 +82,11 @@ void FLib_MemCpy(void *pDst, const void *pSrc, uint32_t cBytes)
 #if gUseToolchainMemFunc_d
     (void)memcpy(pDst, pSrc, cBytes);
 #else
-    while (cBytes)
+    while (cBytes != 0U)
     {
-        *((uint8_t *)pDst) = *((uint8_t *)pSrc);
+        *((uint8_t *)pDst) = *((const uint8_t *)pSrc);
         pDst               = ((uint8_t *)pDst) + 1;
-        pSrc               = ((uint8_t *)pSrc) + 1;
+        pSrc               = ((const uint8_t *)pSrc) + 1;
         cBytes--;
     }
 #endif
@@ -309,14 +309,14 @@ bool_t FLib_MemCmp(const void *pData1, /* IN: First memory block to compare */
 #else
     while (cBytes != 0UL)
     {
-        if (*((uint8_t *)pData1) != *((const uint8_t *)pData2))
+        if (*((const uint8_t *)pData1) != *((const uint8_t *)pData2))
         {
             status = FALSE;
             break;
         }
 
-        pData2 = (uint8_t *)pData2 + 1U;
-        pData1 = (uint8_t *)pData1 + 1U;
+        pData2 = (const uint8_t *)pData2 + 1U;
+        pData1 = (const uint8_t *)pData1 + 1U;
         cBytes--;
     }
 #endif

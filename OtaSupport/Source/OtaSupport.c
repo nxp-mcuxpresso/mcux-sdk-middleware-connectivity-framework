@@ -44,11 +44,6 @@
 *******************************************************************************
 ******************************************************************************/
 
-/* TODO : resolve [MATTER-422] to uncomment the static_assert*/
-/* Check if the defined transaction size matches the transaction structure */
-/*static_assert(sizeof(FLASH_TransactionOpNode_t) == gOtaTransactionSz_d,
-              "gOtaTransactionSz_d does not match the actual size of FLASH_TransactionOpNode_t sructure");*/
-
 typedef struct
 {
     /*! Flag storing whether we are already in the process of writing an image received OTA in the OTA storage or not */
@@ -111,7 +106,6 @@ static void                   OTA_WritePendingData(void);
 static int                    OTA_TransactionQueuePurge(void);
 static void                   OTA_MsgQueue(FLASH_TransactionOp_t *pMsg);
 static void                   OTA_MsgDequeue(void);
-static bool                   OTA_IsTransactionPending(void);
 static otaResult_t            OTA_PostWriteToFlash(uint16_t NoOfBytes, uint32_t Addr, uint8_t *pData);
 static bool                   OTA_UsePostedOperation(void);
 static void                   OTA_FlashTransactionFree(FLASH_TransactionOp_t *pTr);
@@ -838,11 +832,12 @@ otaResult_t OTA_MakeHeadRoomForNextBlock(uint32_t size, ota_op_completion_cb_t c
                 RAISE_ERROR(status, gOtaError_c);
             }
 
-            pMsg->flash_addr             = mHdl.ErasedUntilAddress;
-            pMsg->sz                     = (int32_t)size;
-            pMsg->op_type                = FLASH_OP_ERASE_NEXT_BLOCK;
-            *(uint32_t *)(&pMsg->buf[0]) = callback.pf;
-            *(uint32_t *)(&pMsg->buf[4]) = param;
+            pMsg->flash_addr = mHdl.ErasedUntilAddress;
+            pMsg->sz         = (int32_t)size;
+            pMsg->op_type    = FLASH_OP_ERASE_NEXT_BLOCK;
+
+            FLib_MemCpyWord(&pMsg->buf[0], &callback.pf);
+            FLib_MemCpyWord(&pMsg->buf[4], &param);
 
             OTA_MsgQueue(pMsg);
 
@@ -959,6 +954,11 @@ otaResult_t OTA_SelectExternalStoragePartition(uint32_t partition_offset, uint32
     } while (false);
 
     return status;
+}
+
+bool OTA_IsTransactionPending(void)
+{
+    return LIST_GetSize(&mHdl.op_queue) != 0U ? true : false;
 }
 
 /************************************************************************************
@@ -1133,11 +1133,6 @@ static void OTA_FlashTransactionFree(FLASH_TransactionOp_t *pTr)
     assert(status == kLIST_Ok);
     (void)status;
     OSA_EnableIRQGlobal();
-}
-
-static bool OTA_IsTransactionPending(void)
-{
-    return LIST_GetSize(&mHdl.op_queue) != 0U ? true : false;
 }
 
 static void OTA_MsgQueue(FLASH_TransactionOp_t *pMsg)
