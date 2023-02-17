@@ -150,6 +150,17 @@ bool_t FLib_MemCmpToVal(const void *pAddr, uint8_t val, uint32_t len);
 void FLib_MemSet(void *pData, uint8_t value, uint32_t cBytes);
 
 /*! *********************************************************************************
+ * \brief  This function sets all words in a specified buffer to a set value.
+ *   The memory set is done word per word
+ *
+ * \param[in,out]  pDst  Address of the buffer to set.
+ * \param[in]  value  Set value.
+ * \param[in]  cWords Number of words to set in the buffer.
+ *
+ ********************************************************************************** */
+void FLib_MemSet32Aligned(void *pData, uint32_t value, uint32_t cWords);
+
+/*! *********************************************************************************
  * \brief Copy bytes, possibly into the same overlapping memory as it is taken from
  *
  * \param[out] pDst   Pointer to destination memory block

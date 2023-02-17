@@ -14,3 +14,10 @@ target_include_directories(connfwk-platform-${CONNFWK_PLATFORM} PUBLIC ${INCLUDE
 
 # Get common configs from the connfwk-config interface
 target_link_libraries(connfwk-platform-${CONNFWK_PLATFORM} PRIVATE connfwk-config connfwk-platform-${CONNFWK_PLATFORM_FAMILY})
+
+if(PROJECT_IS_TOP_LEVEL)
+    connfwk_target_set_linker_script(connfwk-platform-${CONNFWK_PLATFORM} PUBLIC ${CONNFWK_PLATFORM_LINKER_FILE})
+    # Rebuild executables if the linker script is changed
+    set_target_properties(connfwk-config PROPERTIES INTERFACE_LINK_DEPENDS ${CONNFWK_PLATFORM_LINKER_FILE})
+    connfwk_target_generate_map_file(connfwk-platform-${CONNFWK_PLATFORM} PUBLIC ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/$<TARGET_PROPERTY:NAME>.map)
+endif()

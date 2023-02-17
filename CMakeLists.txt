@@ -2,12 +2,12 @@
 # All rights reserved.
 # SPDX-License-Identifier: BSD-3-Clause
 
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
 
 enable_language(C CXX ASM)
 set(CMAKE_C_STANDARD 99)
 
-project(connfwk VERSION 6.0.10)
+project(connfwk VERSION 6.1.0)
 
 message(STATUS "************ CONNFWK CONFIGURATION ************")
 message(STATUS "CONNFWK_PLATFORM: " ${CONNFWK_PLATFORM})
@@ -16,16 +16,20 @@ message(STATUS "CONNFWK_PLATFORM: " ${CONNFWK_PLATFORM})
 # The framework will fill it with its own infos
 add_library(connfwk-config INTERFACE)
 
-# Get absolute path to mcu-sdk-2.0 and framework repos
-file(REAL_PATH ${CMAKE_CURRENT_SOURCE_DIR}/../../.. SDK_ROOT)
-
 # Check if the Connectivity Framework is the top level folder
-if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+if(PROJECT_IS_TOP_LEVEL)
+    # CONNFWK_SDK_ROOT can be defined by the user in case the framework is not directly included in the SDK
+    if(NOT CONNFWK_SDK_ROOT)
+        # Get absolute path to mcu-sdk-2.0 root folder
+        file(REAL_PATH ${CMAKE_CURRENT_SOURCE_DIR}/../../.. CONNFWK_SDK_ROOT)
+    endif()
+    message(STATUS "CONNFWK_SDK_ROOT: " ${CONNFWK_SDK_ROOT})
     set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/${CMAKE_BUILD_TYPE}/lib)
     set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/${CMAKE_BUILD_TYPE}/lib)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/${CMAKE_BUILD_TYPE}/bin)
     # Configure sdk specific flags, includes and compile options for the selected platform
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/configs/${CONNFWK_PLATFORM}.cmake)
+    message(STATUS "CONNFWK_PLATFORM_LINKER_FILE: " ${CONNFWK_PLATFORM_LINKER_FILE})
 else()
     message(STATUS "CONNFWK is a subdirectory ! Make sure to set SDK properties to connfwk-config")
 endif()
@@ -55,38 +59,8 @@ target_include_directories(connfwk-config INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/platform/${CONNFWK_PLATFORM}/configs
 )
 
-# Give the possibility to the user to define his own path to board files
-if(CONNFWK_BOARD_PATH)
-    message(STATUS  "Using user defined board folder:\n"
-        "${CONNFWK_BOARD_PATH}"
-        "${OT_NXP_FREERTOS_CONFIG_PATH}"
-    )
-    if(NOT NXP_BOARD_LIB)
-        message(WARNING  "The name of the board lib is not specified. It may not be linked properly by framework targets\n"
-            "You can add the link dependency in your projet:\n"
-            "target_link_libraries(<app-target> <your board target>)\n"
-            "Or you can define the name of your board library:\n"
-            "-DNXP_BOARD_LIB=<name of the board lib>\n"
-            "or set it in your project before including framework:\n"
-            "set(NXP_BOARD_LIB <name of the board lib>)"
-        )
-    endif()
-    add_subdirectory(${CONNFWK_BOARD_PATH} ${PROJECT_BINARY_DIR}/board)
-    target_link_libraries(connfwk-config
-        INTERFACE
-        ${NXP_BOARD_LIB}
-    )
-elseif(CONNFWK_BOARD)
-    if(NOT CONNFWK_FREERTOS_CONFIG_PATH)
-        set(CONNFWK_FREERTOS_CONFIG_PATH ${PROJECT_SOURCE_DIR}/boards/${OT_NXP_BOARD}/freertos)
-    endif()
-    set(NXP_BOARD_LIB nxp-${CONNFWK_BOARD}-board)
-    add_subdirectory(boards/${CONNFWK_BOARD})
-    target_link_libraries(connfwk-config
-        INTERFACE
-        ${NXP_BOARD_LIB}
-    )
-endif()
+# Configure the board lib
+add_subdirectory(boards)
 
 # Configure the platform lib
 add_subdirectory(platform/${CONNFWK_PLATFORM})
@@ -155,7 +129,7 @@ if(CONNFWK_OTW)
 endif()
 
 if(CONNFWK_TESTS)
-    # Include helper functions that can be used by the build target
-    include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/helper.cmake)
     add_subdirectory(tests)
 endif()
+
+add_subdirectory(third_party)

@@ -104,7 +104,7 @@
 #define OTW_ISP_RX_MSG_FLAGS_HEADER_SIZE 5
 #define OTW_ISP_MSG_CRC_SIZE             (sizeof(uint32_t))
 
-#define OTW_MESSAGE_CONTENT_MAX_LEN          512
+#define OTW_MESSAGE_CONTENT_MAX_LEN          640
 #define OTW_MESSAGE_BUFFER_TX_HEADER_MAX_LEN 128
 #define OTW_MESSAGE_BUFFER_TX_MAX_LEN                                                       \
     OTW_ISP_TX_MSG_FLAGS_HEADER_SIZE + OTW_ISP_MSG_CRC_SIZE + OTW_MESSAGE_CONTENT_MAX_LEN + \
@@ -257,12 +257,11 @@ typedef enum
 /* default unlock key is 0x11223344556677881122334455667788 */
 static const uint8_t otwUnlockKey[] = {17, 34, 51, 68, 85, 102, 119, 136, 17, 34, 51, 68, 85, 102, 119, 136};
 
-AT_NONCACHEABLE_SECTION_INIT(static uint8_t otwTxMsgBuffer[OTW_MESSAGE_BUFFER_TX_MAX_LEN]);
-static uint8_t  otwRxMsgBuffer[OTW_MESSAGE_BUFFER_RX_MAX_LEN];
-static uint16_t otwRxMsgBufferWriteIndex;
-static uint16_t otwRxMsgBufferReadIndex;
+/* TX and RX would be accessed by a DMA so data need to be in a noncacheable section */
+AT_NONCACHEABLE_SECTION(static uint8_t otwTxMsgBuffer[OTW_MESSAGE_BUFFER_TX_MAX_LEN]);
+AT_NONCACHEABLE_SECTION(static uint8_t otwRxMsgBuffer[OTW_MESSAGE_BUFFER_RX_MAX_LEN]);
+static uint16_t otwRxMsgBufferReadIndex = 0;
 static OSA_EVENT_HANDLE_DEFINE(otwRxEventHandle);
-static uint8_t otwDmaBuffer[64];
 
 static bool otwIsInitialized = false;
 static bool otwIsBusy        = false;
@@ -671,9 +670,9 @@ eOtwStatus Otw_IsUpdateRequired(const uint8_t *firmwareData, uint32_t firmwareDa
         if (firmwareDataLen < SIGNATURE_LEN)
             break;
         /* align the signatureOffset to a block */
-        sizeToRead += signatureOffset % otwK32w0MemFlashInfo.u32BlockSize;
+        sizeToRead += (signatureOffset % otwK32w0MemFlashInfo.u32BlockSize);
         signatureOffset = signatureOffset - (signatureOffset % otwK32w0MemFlashInfo.u32BlockSize);
-        status          = Otw_ReadFromFlashAndCompare(firmwareData + signatureOffset, SIGNATURE_LEN, signatureOffset);
+        status          = Otw_ReadFromFlashAndCompare(firmwareData + signatureOffset, sizeToRead, signatureOffset);
         if (status == E_OTW_READ_COMPARE_FAILURE)
         {
             status = E_OTW_FIRMWARE_UPDATE_REQUIRED;
@@ -709,9 +708,6 @@ static eOtwStatus Otw_InitUartLink(uint32_t baudRate)
         if (HAL_UartDMATransferInstallCallback((hal_uart_handle_t)g_uartHandle, Otw_DmaCallBack, NULL) !=
             kStatus_HAL_UartDmaSuccess)
             break;
-        if (HAL_UartDMATransferReceive((hal_uart_handle_t)g_uartHandle, otwDmaBuffer, sizeof(otwDmaBuffer), false) !=
-            kStatus_HAL_UartDmaSuccess)
-            break;
         otwStatus = E_OTW_OK;
     } while (0);
 
@@ -725,6 +721,8 @@ static eOtwStatus Otw_DeInitUartLink(void)
     do
     {
         if (HAL_UartDMAAbortReceive((hal_uart_handle_t)g_uartHandle) != kStatus_HAL_UartDmaSuccess)
+            break;
+        if (HAL_UartDMAAbortSend((hal_uart_handle_t)g_uartHandle) != kStatus_HAL_UartDmaSuccess)
             break;
         if (HAL_UartDeinit((hal_uart_handle_t)g_uartHandle) != kStatus_HAL_UartSuccess)
             break;
@@ -791,11 +789,13 @@ static eOtwStatus Otw_WriteMessageAndGetResponse(teBL_MessageType eType,
             break;
         }
         otwIsBusy = true;
-        /* Always re-initialize RX indexes*/
-        otwRxMsgBufferReadIndex  = 0;
-        otwRxMsgBufferWriteIndex = 0;
+        /* Always abort any pending DMA transfert */
+        HAL_UartDMAAbortReceive((hal_uart_handle_t)g_uartHandle);
+        HAL_UartDMAAbortSend((hal_uart_handle_t)g_uartHandle);
         /* Clear any pending RX event */
         OSA_EventClear((osa_event_handle_t)otwRxEventHandle, E_EVENT_FLAG_RX_DATA);
+        /* Always re-initialize RX read index */
+        otwRxMsgBufferReadIndex = 0;
         /* build the msg */
         otwTxMsgBuffer[i++] = 0;
         Otw_SwapAndCopy(&otwTxMsgBuffer[i], (uint8_t *)&msgLength, sizeof(msgLength));
@@ -809,6 +809,14 @@ static eOtwStatus Otw_WriteMessageAndGetResponse(teBL_MessageType eType,
         crc = HAL_CrcCompute((hal_crc_config_t *)&crcConfig, otwTxMsgBuffer, msgLength - OTW_ISP_MSG_CRC_SIZE);
         Otw_SwapAndCopy(&otwTxMsgBuffer[i], (uint8_t *)&crc, sizeof(crc));
         i += sizeof(crc);
+        /* Prepare the dma buffer to receive RX data */
+        if (HAL_UartDMATransferReceive((hal_uart_handle_t)g_uartHandle, otwRxMsgBuffer, sizeof(otwRxMsgBuffer),
+                                       false) != kStatus_HAL_UartDmaSuccess)
+        {
+            otwIsBusy = false;
+            status    = E_OTW_UART_FAILURE;
+            break;
+        }
         if (HAL_UartDMATransferSend((hal_uart_handle_t)g_uartHandle, otwTxMsgBuffer, i) != kStatus_HAL_UartDmaSuccess)
         {
             otwIsBusy = false;
@@ -826,6 +834,7 @@ static eOtwStatus Otw_WriteMessageAndGetResponse(teBL_MessageType eType,
             status = E_OTW_FAILURE;
         }
     } while (0);
+
     return status;
 }
 
@@ -846,12 +855,10 @@ static eOtwStatus Otw_TryReadRxIspMsg(uint8_t * responseStatus,
         /* Block here until RX data is received */
         if (osaStatus != KOSA_StatusSuccess)
         {
-            OTW_LOG("osaStatus = %d, otwRxMsgBufferReadIndex = %d, otwRxMsgBufferWriteIndex=%d", osaStatus,
-                    otwRxMsgBufferReadIndex, otwRxMsgBufferWriteIndex);
+            OTW_LOG("osaStatus = %d, otwRxMsgBufferReadIndex = %d", osaStatus, otwRxMsgBufferReadIndex);
             status = E_OTW_UART_FAILURE;
             break;
         }
-        otwRxMsgBufferReadIndex = otwRxMsgBufferReadIndex + (otwRxMsgBufferWriteIndex - otwRxMsgBufferReadIndex);
         if (currentState == E_READER_STATE_MSG_HEADER_FLAG)
         {
             if (otwRxMsgBufferReadIndex >= OTW_ISP_RX_MSG_FLAGS_HEADER_SIZE)
@@ -922,15 +929,9 @@ static eOtwStatus Otw_ParseIspResponse(uint8_t * responseStatus,
 
 static void Otw_DmaCallBack(hal_uart_dma_handle_t handle, hal_dma_callback_msg_t *msg, void *callbackParam)
 {
-    uint16_t byteToCopy = msg->dataSize;
     if (msg->status == kStatus_HAL_UartDmaIdleline)
     {
-        if ((otwRxMsgBufferWriteIndex + byteToCopy) > sizeof(otwRxMsgBuffer))
-            byteToCopy = sizeof(otwRxMsgBuffer) - otwRxMsgBufferWriteIndex;
-        memcpy(&otwRxMsgBuffer[otwRxMsgBufferWriteIndex], msg->data, byteToCopy);
-        otwRxMsgBufferWriteIndex += byteToCopy;
-        /* Prepare the UART DMA to be able to receive bytes */
-        HAL_UartDMATransferReceive((hal_uart_handle_t)g_uartHandle, otwDmaBuffer, sizeof(otwDmaBuffer), false);
+        otwRxMsgBufferReadIndex += msg->dataSize;
         /* Post an event to indicate that some RX data have been received */
         OSA_EventSet((osa_event_handle_t)otwRxEventHandle, E_EVENT_FLAG_RX_DATA);
     }
