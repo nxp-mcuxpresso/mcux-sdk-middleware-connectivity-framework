@@ -69,95 +69,7 @@ In this case the application (m_text_end) could be up to NV_STORAGE_END_ADDRESS-
 /* Entry Point */
 ENTRY(ResetISR)
 
-m_flash_start   = 0x00000000;
-m_flash_end     = 0x0004FFFF;
-m_flash_size    = 0x00050000;
-m_sector_size   = 512;
-
-m_update_page_address = 0x9de00;
-m_config_page_address = 0x9fc00;   /* CONFIG page of page N-2  */
-
-
-BOOT_SCRATCH_DATA_SZ = 0x400;
-/*
- * stack size for the boot rom during warm boot and application
- * 256 is sufficient (pwrm_test) but keep it large to 1024
- */
-BOOT_RESUME_STACK_SIZE = 0x400;
-
-
-  __base_RAM_Bank0 = 0x04000000;             /* RAM0 Bank0 */
-  __size_RAM_Bank0 = 0x00004000;             /* 16kB */
-  __top_RAM_Bank0  = __base_RAM_Bank0 + __size_RAM_Bank0;
-
-  __base_RAM_Bank1 = 0x04004000;             /* RAM0 Bank1 */
-  __size_RAM_Bank1 = 0x00004000;             /* 16kB */
-  __top_RAM_Bank1  = __base_RAM_Bank1 + __size_RAM_Bank1;
-
-  __base_RAM_Bank2 = 0x04008000;             /* RAM0 Bank2 */
-  __size_RAM_Bank2 = 0x00004000;             /* 16kB */
-  __top_RAM_Bank1  = __base_RAM_Bank2 + __size_RAM_Bank2;
-
-  __base_RAM_Bank3 = 0x0400c000;             /* RAM0 Bank3 */
-  __size_RAM_Bank3 = 0x00004000;             /* 16kB */
-  __top_RAM_Bank3  = __base_RAM_Bank3 + __size_RAM_Bank3;
-
-  __base_RAM_Bank4 = 0x04010000;             /* RAM0 Bank4 */
-  __size_RAM_Bank4 = 0x00002000;             /* 8kB */
-  __top_RAM_Bank4  = __base_RAM_Bank4 + __size_RAM_Bank4;
-
-  __base_RAM_Bank5 = 0x04012000;             /* RAM0 Bank5 */
-  __size_RAM_Bank5 = 0x00002000;             /* 8kB */
-  __top_RAM_Bank5  = __base_RAM_Bank5 + __size_RAM_Bank5;
-
-  __base_RAM_Bank6 = 0x04014000;             /* RAM0 Bank6 */
-  __size_RAM_Bank6 = 0x00001000;             /* 4kB */
-  __top_RAM_Bank6  = __base_RAM_Bank6 + __size_RAM_Bank6;
-
-  __base_RAM_Bank7 = 0x04015000;             /* RAM0 Bank7 */
-  __size_RAM_Bank7 = 0x00001000;             /* 4kB */
-  /*
-   * the 32 top bytes of the RAM0/Bank7 are used for WarmBoot.
-   * These impose that the Bank7 remain under retention.
-   */
-  __BootInterfaceSz       = 32;
-  __top_RAM_Bank7  = __base_RAM_Bank7 + __size_RAM_Bank7 -__BootInterfaceSz ;
-
-
-
-  /* Define a symbol for the top of each memory region */
-  __base_Flash320       = 0x0;            /* Flash640 */
-  __size_Flash320       = 0x50000;        /* 320K bytes */
-  __top_Flash320        = __base_Flash320 + __size_Flash320; 
-  
-  __base_Flash          = __base_Flash320;
-  __size_Flash          = __size_Flash320;
-  __top_Flash           = __top_Flash320;
-  /* RAM0 bank : [0x04000000..0x04000400] trampled at Warm boot
-   * Likewise we choose to place the Boot Resume stack contiguous to this area in 
-   * [0x04000400..0x04000800].
-   * so that we have a 2kB region that can be unretained and be used as a scratch area.
-   * Ideally to minimize retained memory one should concentrate in Bank0 all data not
-   * requiring retention.
-   */
-  __base_unretainedRAM0 = __base_RAM_Bank0;
-  __size_unretainedRAM0 = BOOT_SCRATCH_DATA_SZ + BOOT_RESUME_STACK_SIZE;
-  __top_unretainedRAM0  = __base_unretainedRAM0 + __size_unretainedRAM0; /* start of normal use RAM0 */
-
-  /* The remainder of Bank0 is usable it is up to the papplication designer to decide
-   * to retain Bank0 or not. If so the default below allow for maximum RAM capacity, gaining 14kB
-   * but requiring to retain Bank0 at the expense of power ~420nA.
-   */
-  __base_RAM0           = __top_unretainedRAM0;      /* RAM0 */
-  __size_RAM0           = __top_RAM_Bank7 - __top_unretainedRAM0;      /* RAM0 */
-  /* __base_RAM will be set to __base_RAM0 if the approach favours capacity and
-   * otherwise the Stack of the startup task will be placed in a way such that the top of the stack 
-   * that require retention be in Bank1 while the */ 
-  __base_RAM            = __base_RAM0; 
-  __size_RAM            = __size_RAM0;
-  __top_RAM             = __top_RAM_Bank7;
-
-
+INCLUDE qn9030_map.ld
 
 
 /****************************************************
@@ -210,11 +122,15 @@ m_text_size             = m_text_end + 1 - m_text_start ;
 INT_STORAGE_SECTOR_SIZE = m_sector_size;
 M_VECTOR_RAM_SIZE       = DEFINED(__ram_vector_table__) ? vector_table_size : 0x0;
 
-__StartupTaskTop = __top_RAM_Bank7;
-__size_of_ram    = __size_RAM;
+/* StartupStack retained stack fluctuates
+ * depending on whether the build is release of debug.
+ * Can be adjusted to x0100 in Release mode*/
+__StartupStackRetained  = 0x200;
+__StackTop              = __base_RAM_Bank1 + __StartupStackRetained;
+__size_of_ram           = __top_RAM - __StartupTaskTop;   
 
-PROVIDE(_vStackTop = DEFINED(__user_stack_top) ? __user_stack_top : __top_RAM_Bank7 );
-__StackLimit = _vStackTop - STACK_SIZE; /* only the top 256 bytes of the startup_task are retained */
+PROVIDE(_vStackTop = __StackTop );
+__StackBottom = _vStackTop - STACK_SIZE; /* only the top 256 bytes of the startup_task are retained */
 /* Specify the memory areas */
 MEMORY
 {
@@ -232,9 +148,10 @@ MEMORY
   BANK6          (rwx)   : ORIGIN = __base_RAM_Bank6,  LENGTH = __size_RAM_Bank6
   BANK7          (rwx)   : ORIGIN = __base_RAM_Bank7,  LENGTH = __size_RAM_Bank7
 
-  SCRATCH_RAM    (rwx)   : ORIGIN = __base_RAM_Bank0,  LENGTH = __size_unretainedRAM0   /* 2K bytes (alias SCRATCH_RAM) */
+  SCRATCH_RAM    (rwx)   : ORIGIN = __base_RAM_Bank0,  LENGTH = __StackBottom - __base_RAM_Bank0 /* 2K bytes (alias SCRATCH_RAM) */
  
-  RAM0           (rwx)   : ORIGIN = __base_RAM,        LENGTH = __size_of_ram /* 87K bytes (alias RAM) */
+  RAM0           (rwx)   : ORIGIN = __StackTop,  LENGTH = __size_of_ram /* 87K bytes (alias RAM) */
+
 }
 
 
@@ -412,7 +329,7 @@ SECTIONS
         . = ALIGN(4) ;
         *(.ll.exchange_mem*);
         __ll_exchange_mem_top__ = .;
-    } > RAM0
+    } > BANK7
 
     /* DEFAULT NOINIT SECTION */
     .noinit (NOLOAD): ALIGN(4)
@@ -430,8 +347,8 @@ SECTIONS
     /* end of firmware RAM to be retained in power down mode only if MemManagerLight unused */
     _end_fw_retention = .;
 
-    /* MemManagerLight heap : top can reach up to top of Bank6 but retained area may
-     * recede lower than Bank frontiers allowing to avoid retention of Banks  */
+	/* MemManagerLight heap : top can reach up to top of Bank6 but retained area may
+	 * recede lower than Bank frontiers allowing to avoid retention of Banks  */
     .heap (NOLOAD): ALIGN(4)
     {
         __HEAP_start__ = .;
@@ -440,9 +357,11 @@ SECTIONS
     } > RAM0
     __HEAP_end__ = __top_RAM_Bank6; /* top of Heap in RAM0 */
 
+  
     PROVIDE(_scratch_buf_start = __scratch_area_start__);
     PROVIDE(_scratch_buf_end = __scratch_area_top__);
 }
+ASSERT(__ll_exchange_mem_top__ < __top_RAM_Bank7, "LL echange memory too big to fit into bank7");
 ASSERT(m_app_size % 8192 == 0, "Stated size must be a multiple of 8k")
 
 GROUP(libcr_nohost.a libcr_c.a libcr_eabihelpers.a)

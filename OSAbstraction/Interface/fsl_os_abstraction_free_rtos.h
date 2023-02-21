@@ -69,8 +69,8 @@ MISRAC_ENABLE
  * Declarations
  ******************************************************************************/
 
-/*! @brief Type for a task handler, returned by the OSA_TaskCreate function. */
-typedef TaskHandle_t      task_handler_t;
+/*! @brief Type for a task handle, returned by the OSA_TaskCreate function. */
+typedef TaskHandle_t      task_handle_t;
 
 /*! @brief Type for a task stack.*/
 typedef portSTACK_TYPE   task_stack_t;
@@ -150,9 +150,41 @@ extern void DefaultISR(void);
 #define MSG_QUEUE_DECLARE(name, number, size) \
     msg_queue_t *name = NULL
 
+
+/*!
+ * @brief Special allocation of FreeRTOS task stacks, except that of Idle task.
+ *
+ * @param TaskStackSize requested stack size in bytes.
+ * @param is_idle_task  true is Idle task stack allocation, false otherwise.
+ *
+ * @retval pointer on allocated stack buffer base. Note StackType is a FreeRTOS type
+ *
+ * */
+StackType_t * pvApplicationGetTaskStackMemory( size_t TaskStackSize, uint8_t is_idle_task);
+/*!
+ * @brief At power down, for each task copy stack top from unretained to retained RAM.
+ * *
+ * */
+void OSA_LowPowerRestoreStacksToActualLocation(void);
+/*!
+ * @brief On wakeup, for each task, restore the saved top of stack to unretained area.
+ * *
+ * */
+void OSA_LowPowerCompressStackToRetainedLocation(void);
+
+/*!
+ * @brief At task creation time, FreeRTOS must bind the task TCB handle with the stack area.
+ *
+ * @param tsk_hdl     TCB handle so that pxTopOfStack can be retrieved.
+ * @param stack_base  Task's stack base pointer (could be deduced from TCB->pxStack).
+ * @param stack_word_depth total task's stack depth (top-base).
+ * *
+ * */
+void vApplicationRegisterNewTaskHandleAndStack(void *tsk_hdl, StackType_t *stack_base, size_t stack_word_depth);
 /* @}*/
 
 /*! @}*/
+
 
 #endif // __FSL_OS_ABSTRACTION_FREERTOS_H__
 /*******************************************************************************

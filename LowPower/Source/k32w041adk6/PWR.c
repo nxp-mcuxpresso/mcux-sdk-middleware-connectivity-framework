@@ -1,6 +1,6 @@
 /*! *********************************************************************************
 * Copyright (c) 2015, Freescale Semiconductor, Inc.
-* Copyright 2016-2017, 2019-2020 NXP
+* Copyright 2016-2017, 2019-2020, 2022 NXP
 * All rights reserved.
 *
 * \file
@@ -68,8 +68,6 @@
 extern void hardware_init(void);
 #endif
 
-extern void ResetMCU(void);
-
 /*****************************************************************************
  *                             PRIVATE MACROS                                *
  *---------------------------------------------------------------------------*
@@ -123,6 +121,7 @@ extern void ResetMCU(void);
  * the interface header.                                                     *
  *---------------------------------------------------------------------------*
  *****************************************************************************/
+
 
 /*****************************************************************************
  *                           PRIVATE FUNCTIONS PROTOTYPES                    *
@@ -203,17 +202,17 @@ static bool_t mPreventEnterLowPower   = FALSE;
 
 const SleepModeTable_t maHandleDeepSleepTable[] =
 {
-                                                                                    /* Mode | Osc | RAM | AO LDO | PWRM mapping              */
-    {vHandleSleepModes, PWR_CFG_AO_LDO_BUILD | PWR_CFG_OSC_ON | PWR_CFG_RAM_ON},    /* 1    | On  | On  | Build  | E_AHI_SLEEP_OSCON_RAMON   */
-    {vHandleSleepModes, PWR_CFG_AO_LDO_BUILD | PWR_CFG_OSC_ON | PWR_CFG_RAM_OFF},   /* 2    | On  | Off | Build  | E_AHI_SLEEP_OSCON_RAMOFF  */
-    {vHandleSleepModes, PWR_CFG_REDUCE_AO_LDO | PWR_CFG_OSC_ON | PWR_CFG_RAM_ON},   /* 3    | On  | On  | Reduce | -                         */
+    [0] = {vHandleSleepModes, PWR_CFG_AO_LDO_BUILD | PWR_CFG_OSC_ON | PWR_CFG_RAM_ON},          /* Mode 1 */
+    [1] = {vHandleSleepModes, PWR_CFG_AO_LDO_BUILD | PWR_CFG_OSC_ON | PWR_CFG_RAM_OFF},         /* Mode 2 */
+    [2] = {vHandleSleepModes, PWR_CFG_REDUCE_AO_LDO | PWR_CFG_OSC_ON | PWR_CFG_RAM_ON},         /* Mode 3 */
 #if cPWR_EnableDeepSleepMode_4
-    {vHandleDeepDown,   PWR_CFG_REDUCE_AO_LDO | PWR_CFG_OSC_OFF | PWR_CFG_RAM_OFF}, /* 4    | Off | Off | Reduce | -                         */
+    [3] = {vHandleDeepDown,   PWR_CFG_REDUCE_AO_LDO | PWR_CFG_OSC_OFF | PWR_CFG_RAM_OFF},       /* Mode 4 */
 #else
-    {(pfHandleDeepSleepFunc_t)0, 0},
+    [3] = {(pfHandleDeepSleepFunc_t)0, 0},                                                      /* Mode 4 */
 #endif
-    {vHandleSleepModes, PWR_CFG_REDUCE_AO_LDO | PWR_CFG_OSC_OFF | PWR_CFG_RAM_ON},  /* 5    | Off | On  | Reduce | E_AHI_SLEEP_OSCOFF_RAMON  */
-    {vHandleSleepModes, PWR_CFG_REDUCE_AO_LDO | PWR_CFG_OSC_OFF | PWR_CFG_RAM_OFF}, /* 6    | Off | Off | Reduce | E_AHI_SLEEP_OSCOFF_RAMOFF */
+    [4] = {vHandleSleepModes, PWR_CFG_REDUCE_AO_LDO | PWR_CFG_OSC_OFF | PWR_CFG_RAM_ON},        /* Mode 5 */
+    [5] = {vHandleSleepModes, PWR_CFG_REDUCE_AO_LDO | PWR_CFG_OSC_OFF | PWR_CFG_RAM_OFF},       /* Mode 6 */
+    [6] = {vHandleSleepModes, PWR_CFG_REDUCE_AO_LDO | PWR_CFG_OSC_ON  | PWR_CFG_RAM_OFF | PWR_CFG_TMR_OFF },   /* Mode 7 */
 };
 static ARM_CM4_register_t  cm4_misc_regs;
 static pfPWRCallBack_t gpfPWR_LowPowerEnterCb;
@@ -417,7 +416,7 @@ static void RelinquishXtal32MCtrl(void)
 #if !gPWR_CpuClk_48MHz
 #if (gPWR_SmartFrequencyScaling == 2)
 #if gPWR_LdoVoltDynamic
-	POWER_ApplyLdoActiveVoltage_1V1();
+    POWER_ApplyLdoActiveVoltage_1V1();
 #endif
         BOARD_CpuClockUpdate48Mz();
 #else
@@ -466,7 +465,6 @@ static void vHandleSleepModes(uint32_t mode)
 #if gSupportBle
     uint8_t   power_down_mode = 0xff;
 #endif
-    WTIMER_status_t InterruptStatus1;
 
     /* TODO: Note from pwrm.c is to not disable interrupts "Keep commented
         - DEEP DOWN 1 fails with 4470 Application if interrupts are masked" */
@@ -531,7 +529,12 @@ static void vHandleSleepModes(uint32_t mode)
 
        /* XCVR_Deinit(); no longer required since Radio v2053 */
         SET_MPU_CTRL(0);
-
+        if (mode & PWR_CFG_TMR_OFF)
+        {
+        	WTIMER_StopTimer(WTIMER_TIMER0_ID);
+        	WTIMER_StopTimer(WTIMER_TIMER1_ID);
+            RTC_Deinit(RTC);
+        }
         if (mode & PWR_CFG_OSC_OFF)
         {
             CLOCK_DisableClock(kCLOCK_Fro32k);
@@ -540,6 +543,8 @@ static void vHandleSleepModes(uint32_t mode)
 
         if (mode & PWR_CFG_RAM_ON)
         {
+            WTIMER_status_t InterruptStatus1;
+
             /* Useless to save CM4 registers if RAM is not to be retained */
             Save_CM4_registers(&cm4_misc_regs);
 
@@ -623,7 +628,7 @@ static void vHandleSleepModes(uint32_t mode)
                 }
             }
             LpIoSet(1, 0);
-        }
+        } /* PWR_CFG_RAM_ON */
         else
         {
             pwrlib_pd_cfg_t pd_cfg;
@@ -759,7 +764,6 @@ PWR_WakeupReason_t PWR_CheckForAndEnterNewPowerState(PWR_PowerState_t NewPowerSt
     return ReturnValue;
 }
 
-
 /*****************************************************************************
  *                             PUBLIC FUNCTIONS                              *
  *---------------------------------------------------------------------------*
@@ -825,7 +829,7 @@ void PWR_ForceInit(void)
  *---------------------------------------------------------------------------*/
 void PWR_SystemReset(void)
 {
-    ResetMCU();
+	RESET_SystemReset(); /* do not call RESET_ArmCore here */
 }
 
 
@@ -891,15 +895,20 @@ static int PWR_CheckSocTimers(void)
             for (int i = 0; i < 2; i++)
             {
                 InterruptStatus[i] = WTIMER_GetStatusFlags((WTIMER_timer_id_t)i);
-                timer_count[i]     = WTIMER_ReadTimer((WTIMER_timer_id_t)i);
-
-                if (   (timer_count[i] < PWR_PREVENT_SLEEP_IF_LESS_TICKS)
-                    && (InterruptStatus[i] == WTIMER_STATUS_RUNNING)
-                   )
+                if (InterruptStatus[i] == WTIMER_STATUS_RUNNING)
                 {
-                    dealine_too_close = TRUE;
-                    reason_debug = -2;
-                    break; /* for */
+                    timer_count[i]     = WTIMER_ReadTimer((WTIMER_timer_id_t)i);
+
+                    if (timer_count[i] < PWR_PREVENT_SLEEP_IF_LESS_TICKS)
+                    {
+                        dealine_too_close = TRUE;
+                        reason_debug = -2;
+                        break; /* for */
+                    }
+#if defined PWR_StackCompressionRetention_d && (PWR_StackCompressionRetention_d != 0)
+                    /* If deadline was too close already we will not Power Down anyway */
+                    PWR_SetProgrammedDeadline(timer_count[i]/32); /* Deadline converted to msec */
+#endif
                 }
             }
             if (dealine_too_close)
@@ -952,10 +961,16 @@ static int PWR_CheckSocTimers(void)
                 /* 1kHz clock timer is running */
                 /* Check if the deadline is not too close to go to sleep */
                 uint32_t wake_countdown = RTC->WAKE;
-                if ((wake_countdown > 0) && (MILLISECONDS_TO_TICKS32K(wake_countdown) < PWR_PREVENT_SLEEP_IF_LESS_TICKS))
+                if (wake_countdown > 0)
                 {
-                    reason_debug = -7;
-                    break;
+                    if (MILLISECONDS_TO_TICKS32K(wake_countdown) < PWR_PREVENT_SLEEP_IF_LESS_TICKS)
+                    {
+                        reason_debug = -7;
+                        break;
+                    }
+#if defined PWR_StackCompressionRetention_d && (PWR_StackCompressionRetention_d != 0)
+                    PWR_SetProgrammedDeadline(wake_countdown); /* msec */
+#endif
                 }
             }
         }
@@ -1006,6 +1021,12 @@ bool_t PWR_CheckIfDeviceCanGoToSleep(void)
             /* Check if BLE LL can sleep */
             pwr_mode = (uint8_t)BLE_get_sleep_mode();
             if (pwr_mode < kPmPowerDown0) break;
+#if defined PWR_StackCompressionRetention_d && (PWR_StackCompressionRetention_d != 0)
+            /* BLE_TimeBeforeNextBleEvent returns number of microseconds till next BLE event */
+            uint32_t deadline = BLE_TimeBeforeNextBleEvent();
+            /* divide by 1000 to obtain milliseconds */
+            PWR_SetProgrammedDeadline(deadline/1000);
+#endif
         }
 #endif
 
@@ -1077,14 +1098,14 @@ int PWR_CheckIfDeviceCanGoToSleepExt(void)
 #endif
 
        int ret = PWR_CheckSocTimers();
-       if ( ret != 0 )     // do not overide reason_debug if ret is 0
+       if ( ret != 0 )     // do not override reason_debug if ret is 0
        {
-          /* if timer prevents lowpower, needs to negative the returned value */
+          /* if timer prevents lowpower, needs to invert the returned value  to make it negative */
           reason_debug = ret;
           break;
        }
 
-        /* with gPWR_BleLL_EarlyEnterDsm, Ble LL will go to lowpower if possible
+        /* with gPWR_BleLL_EarlyEnterDsm, BLE LL will go to lowpower if possible
             ->  shall be the last check before the lowpower entry     */
 #if gSupportBle && gPWR_BleLL_EarlyEnterDsm
         /* Check first if ble can go to sleep because
@@ -1252,6 +1273,11 @@ PWR_WakeupReason_t PWR_EnterPowerDown(void)
     ReturnValue.AllBits = 0;
 #if (cPWR_FullPowerDownMode)
     OSA_InterruptDisable();
+
+#if gSupportBle
+    BLE_SlpAlgoDurationAdjustement();
+    BLE_OscWakeDelayAdjustement();
+#endif
 
     ReturnValue = PWR_HandleDeepSleep();
 
@@ -1570,6 +1596,28 @@ void PWR_vForceRamRetention(uint32_t u32RetainBitmap)
 {
     pwrm_force_retention &= ~(PM_CFG_SRAM_ALL_RETENTION << PM_CFG_SRAM_BANK_BIT_BASE);
     pwrm_force_retention |= (u32RetainBitmap & PM_CFG_SRAM_ALL_RETENTION) << PM_CFG_SRAM_BANK_BIT_BASE;
+}
+
+bool_t PWR_vStackRetention(bool_t SetnClr)
+{
+    static bool_t stack_retention_on = FALSE;
+    bool_t cfg_change = FALSE;
+    /* This is assuming Stacks are all placed in Bank0 */
+    if (stack_retention_on != SetnClr)
+    {
+        stack_retention_on = SetnClr;
+        PWR_ResetPowerDownModeConfig();
+        cfg_change = TRUE;
+    }
+    if (SetnClr)
+    {
+        pwrm_force_retention |= BIT(0);
+    }
+    else
+    {
+        pwrm_force_retention &= ~BIT(0);
+    }
+    return cfg_change;
 }
 
 void PWR_vAddRamRetention(uint32_t u32Start, uint32_t u32Length)

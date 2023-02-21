@@ -64,6 +64,7 @@ typedef struct
     uint8_t u8Level;
 } tsMicroIntStorage;
 
+
 #if gUsePdm_d
 
 /****************************************************************************/
@@ -167,7 +168,11 @@ __PDM_WEAK_FUNC void *pvHeap_Alloc(void *pvPointer, uint32_t u32BytesNeeded, boo
 #if defined FSL_RTOS_FREE_RTOS && (FSL_RTOS_FREE_RTOS != 0)
         pvPointer = pvPortMalloc(u32BytesNeeded);
 #else
+#if !defined gMemManagerLight || (gMemManagerLight == 0)
         pvPointer = MEM_BufferAllocWithId(u32BytesNeeded, gPdmMemPoolId_c, (void*)__get_LR());
+#else
+        pvPointer = MEM_BufferAlloc(u32BytesNeeded);
+#endif
 #endif
         if (pvPointer == NULL) break;
         if (bClear)

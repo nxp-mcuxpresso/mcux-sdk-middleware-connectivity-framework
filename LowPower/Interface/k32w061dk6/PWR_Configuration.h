@@ -49,11 +49,29 @@
 #define gAppDeepSleepMode_c    1
 #endif
 
-#define cPWR_NoClockGating                     0
-#define cPWR_ClockGating                       1
-#define cPWR_DeepSleep_RamOffOsc32kOn          2
-#define cPWR_PowerDown_RamRet                  3
-#define cPWR_DeepSleep_RamOffOsc32kOff         4
+/* ------------------------------------------------------------------------------------------------------*/
+/* Mode                                     | Osc | RAM | AO LDO | TMR | PWRM mapping                    */
+/*-------------------------------------------------------------------------------------------------------*/
+/* 1 cPWR_ClockGating                       | On  | On  | Build  | On  | E_AHI_SLEEP_OSCON_RAMON         */
+/* 2 cPWR_DeepSleep_RamOffOsc32kOn          | On  | Off | Build  | On  | E_AHI_SLEEP_OSCON_RAMOFF        */
+/* 3 cPWR_PowerDown_RamRet                  | On  | On  | Reduce | On  |                                 */
+/* 4 cPWR_DeepSleep_RamOffOsc32kOff         | Off | Off | Reduce | NA  |                                 */
+/* 5 cPWR_DeepSleep_RamOnOsc32kOff          | Off | On  | Reduce | NA  | E_AHI_SLEEP_OSCOFF_RAMON        */
+/* 6 cPWR_DeepSleep_RamOffOsc32kOff2        | Off | Off | Reduce | NA  | E_AHI_SLEEP_OSCOFF_RAMOFF       */
+/* 7 cPWR_DeepSleep_RamOffOsc32kOnTimersOff | On  | Off | Reduce | Off | E_AHI_SLEEP_OSCON_RAMOFF_TMROFF */
+
+/* Mode 4 and Mode 6 are identical except that mode 4 may be compiled using cPWR_EnableDeepSleepMode_4 */
+/* Mode 2 and 7 are similar except that timer wake sources are stopped in mode 7 */
+/* Mode 7 allows DIO retention while keeping the Osc32k */
+
+#define cPWR_NoClockGating                      0u
+#define cPWR_ClockGating                        1u
+#define cPWR_DeepSleep_RamOffOsc32kOn           2u
+#define cPWR_PowerDown_RamRet                   3u
+#define cPWR_DeepSleep_RamOffOsc32kOff          4u
+#define cPWR_DeepSleep_RamOnOsc32kOff           5u
+#define cPWR_DeepSleep_RamOffOsc32kOff2         6u
+#define cPWR_DeepSleep_RamOffOsc32kOnTimersOff  7u
 
 
 #ifndef gPWR_LpOscOptim

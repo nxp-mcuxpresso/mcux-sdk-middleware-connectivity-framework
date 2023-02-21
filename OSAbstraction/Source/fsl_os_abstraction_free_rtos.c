@@ -1,11 +1,11 @@
 /*! *********************************************************************************
 * Copyright (c) 2015, Freescale Semiconductor, Inc.
-* Copyright 2016-2017, 2019 NXP
+* Copyright 2016-2017, 2019, 2022 NXP
 * All rights reserved.
 *
 * \file
 *
-* This is the source file for the OS Abstraction layer for freertos. 
+* This is the source file for the OS Abstraction layer for freertos.
 *
 * SPDX-License-Identifier: BSD-3-Clause
 ********************************************************************************** */
@@ -22,6 +22,24 @@
 #include "GenericList.h"
 #include "fsl_common.h"
 #include "Panic.h"
+#include "MemManager.h"
+#include "FunctionLib.h"
+#include "PWR_Interface.h"
+
+
+
+/* Only for debug purposes to check if restored stack is identical to the one
+ * on power down */
+#undef StackCorruptionDetect_d
+
+#ifdef StackCorruptionDetect_d
+#include "SecLib.h"
+#endif
+
+#define DmaMemMove_d 1
+#if (DmaMemMove_d != 0)
+#include "fsl_dma.h"
+#endif
 /*! *********************************************************************************
 *************************************************************************************
 * Private macros
@@ -41,6 +59,13 @@
 #define osObjectAlloc_c 0
 #endif
 
+#if (configSUPPORT_STACK_UNRETAINED == 1)
+/* MAX_TASB_NB must be sufficient to hold have a one task_tb entry per FreeRTOS task */
+#define MAX_TASK_NB 8u
+#if (DmaMemMove_d != 0)
+#define DMA_MEMCPY_CHANNEL 0
+#endif
+#endif
 /*! @brief Converts milliseconds to ticks*/
 #define MSEC_TO_TICK(msec)  (((uint32_t)(msec)+500uL/(uint32_t)configTICK_RATE_HZ) \
                              *(uint32_t)configTICK_RATE_HZ/1000uL)
@@ -74,6 +99,20 @@ typedef struct osObjectInfo_tag
 #define OsaBasePri_d 0
 #endif
 
+#if (configSUPPORT_STACK_UNRETAINED == 1)
+typedef struct  {
+    task_handle_t tsk_hdl;
+    uint32_t *stack_top;
+    uint32_t *retained_stk;
+    uint32_t retained_sz;
+#if DmaMemMove_d != 0
+    dma_transfer_config_t dma_cfg;
+#endif
+#ifdef StackCorruptionDetect_d
+    uint8_t stack_digest[SHA256_HASH_SIZE];
+#endif
+} compressed_task_stack_t;
+#endif
 /*! *********************************************************************************
 *************************************************************************************
 * Private prototypes
@@ -101,6 +140,20 @@ static uint32_t g_base_priority_array[OSA_MAX_ISR_CRITICAL_SECTION_DEPTH];
 static int32_t  g_base_priority_top = 0;
 #endif
 
+#if (configSUPPORT_STACK_UNRETAINED == 1)
+static compressed_task_stack_t task_tb[MAX_TASK_NB] = { 0 };
+static uint8_t nb_tasks_created = 0;
+static uint32_t stack_words_copied;
+static uint32_t stack_words_restored;
+
+static uint32_t pd_cnt = 0;
+static uint32_t wu_cnt = 0;
+
+#if (DmaMemMove_d != 0)
+dma_handle_t g_DMA_memcpy_handle;
+DMA_ALLOCATE_LINK_DESCRIPTORS(dma_desc, (MAX_TASK_NB+1));
+#endif
+#endif
 /*! *********************************************************************************
 *************************************************************************************
 * Private memory declarations
@@ -163,7 +216,7 @@ osaStatus_t OSA_TaskYield(void)
  *END**************************************************************************/
 osaTaskPriority_t OSA_TaskGetPriority(osaTaskId_t taskId)
 {
-  return (osaTaskPriority_t)(PRIORITY_RTOS_TO_OSA(uxTaskPriorityGet((task_handler_t)taskId)));
+  return (osaTaskPriority_t)(PRIORITY_RTOS_TO_OSA(uxTaskPriorityGet((task_handle_t)taskId)));
 }
 
 /*FUNCTION**********************************************************************
@@ -174,9 +227,10 @@ osaTaskPriority_t OSA_TaskGetPriority(osaTaskId_t taskId)
  *END**************************************************************************/
 osaStatus_t OSA_TaskSetPriority(osaTaskId_t taskId, osaTaskPriority_t taskPriority)
 {
-    vTaskPrioritySet((task_handler_t)taskId, PRIORITY_OSA_TO_RTOS(taskPriority));
+    vTaskPrioritySet((task_handle_t)taskId, PRIORITY_OSA_TO_RTOS(taskPriority));
     return osaStatus_Success;
 }
+
 
 /*FUNCTION**********************************************************************
 *
@@ -189,29 +243,30 @@ osaStatus_t OSA_TaskSetPriority(osaTaskId_t taskId, osaTaskPriority_t taskPriori
 *END**************************************************************************/
 osaTaskId_t OSA_TaskCreate(osaThreadDef_t *thread_def,osaTaskParam_t task_param)
 {
-  osaTaskId_t taskId = NULL;
-  task_handler_t task_handler;
-  
-  if (xTaskCreate(
+    osaTaskId_t taskId = NULL;
+    task_handle_t task_handle = NULL;
+
+    if (xTaskCreate(
                   (task_t)thread_def->pthread,  /* pointer to the task */
                   (char const*)thread_def->tname, /* task name for kernel awareness debugging */
                   thread_def->stacksize/sizeof(portSTACK_TYPE), /* task stack size */
                   (task_param_t)task_param, /* optional task startup argument */
                   PRIORITY_OSA_TO_RTOS(thread_def->tpriority),  /* initial priority */
-                  &task_handler /* optional task handle to create */
+                  &task_handle /* optional task handle to create */
                     ) == pdPASS)
-  {
-    taskId = (osaTaskId_t)task_handler;
-  }
-  return taskId;
+    {
+        taskId = (osaTaskId_t)task_handle;
+    }
+
+    return taskId;
 }
 
 /*FUNCTION**********************************************************************
  *
  * Function Name : OSA_TaskDestroy
- * Description   : This function destroy a task. 
+ * Description   : This function destroy a task.
  * Param[in]     :taskId - Thread handle.
- * Return osaStatus_Success if the task is destroied, otherwise return osaStatus_Error.
+ * Return osaStatus_Success if the task is destroyed, otherwise return osaStatus_Error.
  *
  *END**************************************************************************/
 osaStatus_t OSA_TaskDestroy(osaTaskId_t taskId)
@@ -222,13 +277,23 @@ osaStatus_t OSA_TaskDestroy(osaTaskId_t taskId)
   oldPriority = OSA_TaskGetPriority(OSA_TaskGetId());
   (void)OSA_TaskSetPriority(OSA_TaskGetId(), OSA_PRIORITY_REAL_TIME);
 #if INCLUDE_vTaskDelete /* vTaskDelete() enabled */
-  vTaskDelete((task_handler_t)taskId);
+  vTaskDelete((task_handle_t)taskId);
+#if (configSUPPORT_STACK_UNRETAINED == 1)
+  for (uint8_t i = 0; i<MAX_TASK_NB; i++)
+  {
+      if ((osaTaskId_t)task_tb[i].tsk_hdl == taskId)
+      {
+          task_tb[i].tsk_hdl = NULL;
+          nb_tasks_created--;
+      }
+  }
+#endif
   status = osaStatus_Success;
 #else
   status = osaStatus_Error; /* vTaskDelete() not available */
 #endif
   (void)OSA_TaskSetPriority(OSA_TaskGetId(), oldPriority);
-  
+
   return status;
 }
 
@@ -287,8 +352,8 @@ uint32_t OSA_GetTickCount(void)
 /*FUNCTION**********************************************************************
  *
  * Function Name : OSA_SemaphoreCreate
- * Description   : This function is used to create a semaphore. 
- * Return         : Semaphore handle of the new semaphore, or NULL if failed. 
+ * Description   : This function is used to create a semaphore.
+ * Return         : Semaphore handle of the new semaphore, or NULL if failed.
   *
  *END**************************************************************************/
 osaSemaphoreId_t OSA_SemaphoreCreate(uint32_t initValue)
@@ -297,11 +362,11 @@ osaSemaphoreId_t OSA_SemaphoreCreate(uint32_t initValue)
     semaphore_t sem;
     sem = xSemaphoreCreateCounting(0xFF, initValue);
     return (osaSemaphoreId_t)sem;
-#else 
+#else
     (void)initValue;
     return NULL;
 #endif
-    
+
 }
 
 /*FUNCTION**********************************************************************
@@ -314,17 +379,17 @@ osaSemaphoreId_t OSA_SemaphoreCreate(uint32_t initValue)
 osaStatus_t OSA_SemaphoreDestroy(osaSemaphoreId_t semId)
 {
 #if osNumberOfSemaphores
-  semaphore_t sem = (semaphore_t)semId; 
+  semaphore_t sem = (semaphore_t)semId;
   if(sem == NULL)
   {
     return osaStatus_Error;
-  }   
+  }
   vSemaphoreDelete(sem);
   return osaStatus_Success;
 #else
   (void)semId;
   return osaStatus_Error;
-#endif  
+#endif
 }
 
 /*FUNCTION**********************************************************************
@@ -355,7 +420,7 @@ osaStatus_t OSA_SemaphoreWait(osaSemaphoreId_t semId, uint32_t millisec)
     return osaStatus_Error;
   }
   semaphore_t sem = (semaphore_t)semId;
-  
+
   /* Convert timeout from millisecond to tick. */
   if (millisec == osaWaitForever_c)
   {
@@ -365,7 +430,7 @@ osaStatus_t OSA_SemaphoreWait(osaSemaphoreId_t semId, uint32_t millisec)
   {
     timeoutTicks = MSEC_TO_TICK(millisec);
   }
-  
+
   if (xSemaphoreTake(sem, timeoutTicks)==pdFALSE)
   {
     return osaStatus_Timeout; /* timeout */
@@ -375,10 +440,10 @@ osaStatus_t OSA_SemaphoreWait(osaSemaphoreId_t semId, uint32_t millisec)
     return osaStatus_Success; /* semaphore taken */
   }
 #else
-  (void)semId; 
+  (void)semId;
   (void)millisec;
   return osaStatus_Error;
-#endif  
+#endif
 }
 
 /*FUNCTION**********************************************************************
@@ -403,11 +468,11 @@ osaStatus_t OSA_SemaphorePost(osaSemaphoreId_t semId)
   if(semId)
   {
     semaphore_t sem = (semaphore_t)semId;
-    
+
     if (__get_IPSR())
     {
       portBASE_TYPE taskToWake = pdFALSE;
-      
+
       if (pdTRUE==xSemaphoreGiveFromISR(sem, &taskToWake))
       {
         if (pdTRUE == taskToWake)
@@ -431,31 +496,31 @@ osaStatus_t OSA_SemaphorePost(osaSemaphoreId_t semId)
       {
         status = osaStatus_Error;
       }
-    }    
+    }
   }
   return status;
 #else
   (void)semId;
   return osaStatus_Error;
-#endif  
+#endif
 }
 
 /*FUNCTION**********************************************************************
  *
  * Function Name : OSA_MutexCreate
  * Description   : This function is used to create a mutex.
- * Return        : Mutex handle of the new mutex, or NULL if failed. 
+ * Return        : Mutex handle of the new mutex, or NULL if failed.
  *
  *END**************************************************************************/
 osaMutexId_t OSA_MutexCreate(void)
 {
-#if osNumberOfMutexes  
+#if osNumberOfMutexes
     mutex_t mutex;
     mutex = xSemaphoreCreateMutex();
     return (osaMutexId_t)mutex;
 #else
     return NULL;
-#endif      
+#endif
 }
 
 /*FUNCTION**********************************************************************
@@ -470,7 +535,7 @@ osaMutexId_t OSA_MutexCreate(void)
  *END**************************************************************************/
 osaStatus_t OSA_MutexLock(osaMutexId_t mutexId, uint32_t millisec)
 {
-#if osNumberOfMutexes    
+#if osNumberOfMutexes
     uint32_t timeoutTicks;
     mutex_t mutex = (mutex_t)mutexId;
 
@@ -509,9 +574,9 @@ osaStatus_t OSA_MutexLock(osaMutexId_t mutexId, uint32_t millisec)
     }
 #else
     (void)mutexId;
-    (void)millisec;  
+    (void)millisec;
     return osaStatus_Error;
-#endif  
+#endif
 }
 
 /*FUNCTION**********************************************************************
@@ -522,7 +587,7 @@ osaStatus_t OSA_MutexLock(osaMutexId_t mutexId, uint32_t millisec)
  *END**************************************************************************/
 osaStatus_t OSA_MutexUnlock(osaMutexId_t mutexId)
 {
-#if osNumberOfMutexes  
+#if osNumberOfMutexes
   mutex_t mutex = (mutex_t)mutexId;
 
   if (xTaskGetSchedulerState() == taskSCHEDULER_SUSPENDED)
@@ -539,7 +604,7 @@ osaStatus_t OSA_MutexUnlock(osaMutexId_t mutexId)
   {
     return osaStatus_Error;
   }
-  
+
   if (xSemaphoreGive(mutex)==pdPASS)
   {
     return osaStatus_Success;
@@ -550,8 +615,8 @@ osaStatus_t OSA_MutexUnlock(osaMutexId_t mutexId)
   }
 #else
   (void)mutexId;
-  return osaStatus_Error;  
-#endif  
+  return osaStatus_Error;
+#endif
 }
 
 /*FUNCTION**********************************************************************
@@ -563,32 +628,32 @@ osaStatus_t OSA_MutexUnlock(osaMutexId_t mutexId)
  *END**************************************************************************/
 osaStatus_t OSA_MutexDestroy(osaMutexId_t mutexId)
 {
-#if osNumberOfMutexes    
+#if osNumberOfMutexes
   mutex_t mutex = (mutex_t)mutexId;
   if(mutexId == NULL)
   {
-    return osaStatus_Error;    
+    return osaStatus_Error;
   }
   vSemaphoreDelete(mutex);
   return osaStatus_Success;
 #else
   (void)mutexId;
-  return osaStatus_Error;    
-#endif  
+  return osaStatus_Error;
+#endif
 }
 
 /*FUNCTION**********************************************************************
  *
  * Function Name : OSA_EventCreate
  * Description   : This function is used to create a event object.
- * Return        : Event handle of the new event, or NULL if failed. 
+ * Return        : Event handle of the new event, or NULL if failed.
  *
  *END**************************************************************************/
 osaEventId_t OSA_EventCreate(bool_t autoClear)
 {
-#if osNumberOfEvents  
+#if osNumberOfEvents
   osaEventId_t eventId;
-  osEventStruct_t* pEventStruct; 
+  osEventStruct_t* pEventStruct;
   OSA_InterruptDisable();
   eventId = pEventStruct = osObjectAlloc(&osEventInfo);
   OSA_InterruptEnable();
@@ -596,7 +661,7 @@ osaEventId_t OSA_EventCreate(bool_t autoClear)
   {
     return NULL;
   }
-  
+
   pEventStruct->event.eventHandler = xEventGroupCreate();
   if (pEventStruct->event.eventHandler)
   {
@@ -613,7 +678,7 @@ osaEventId_t OSA_EventCreate(bool_t autoClear)
 #else
   (void)autoClear;
   return NULL;
-#endif  
+#endif
 }
 
 /*FUNCTION**********************************************************************
@@ -625,14 +690,14 @@ osaEventId_t OSA_EventCreate(bool_t autoClear)
  *END**************************************************************************/
 osaStatus_t OSA_EventSet(osaEventId_t eventId, osaEventFlags_t flagsToSet)
 {
-#if osNumberOfEvents    
-  osEventStruct_t* pEventStruct; 
+#if osNumberOfEvents
+  osEventStruct_t* pEventStruct;
   portBASE_TYPE taskToWake = pdFALSE;
   if(osObjectIsAllocated(&osEventInfo, eventId) == FALSE)
   {
     return osaStatus_Error;
   }
-  pEventStruct = (osEventStruct_t*)eventId;  
+  pEventStruct = (osEventStruct_t*)eventId;
   if(pEventStruct->event.eventHandler == NULL)
   {
     return osaStatus_Error;
@@ -656,9 +721,9 @@ osaStatus_t OSA_EventSet(osaEventId_t eventId, osaEventFlags_t flagsToSet)
   return osaStatus_Success;
 #else
   (void)eventId;
-  (void)flagsToSet;  
+  (void)flagsToSet;
   return osaStatus_Error;
-#endif  
+#endif
 }
 
 /*FUNCTION**********************************************************************
@@ -670,19 +735,19 @@ osaStatus_t OSA_EventSet(osaEventId_t eventId, osaEventFlags_t flagsToSet)
  *END**************************************************************************/
 osaStatus_t OSA_EventClear(osaEventId_t eventId, osaEventFlags_t flagsToClear)
 {
-#if osNumberOfEvents      
-  
-  osEventStruct_t* pEventStruct; 
+#if osNumberOfEvents
+
+  osEventStruct_t* pEventStruct;
   if(osObjectIsAllocated(&osEventInfo, eventId) == FALSE)
   {
     return osaStatus_Error;
   }
-  pEventStruct = (osEventStruct_t*)eventId;  
+  pEventStruct = (osEventStruct_t*)eventId;
   if(pEventStruct->event.eventHandler == NULL)
   {
     return osaStatus_Error;
-  } 
-  
+  }
+
   if (__get_IPSR())
   {
     xEventGroupClearBitsFromISR(pEventStruct->event.eventHandler, (event_flags_t)flagsToClear);
@@ -691,13 +756,13 @@ osaStatus_t OSA_EventClear(osaEventId_t eventId, osaEventFlags_t flagsToClear)
   {
     xEventGroupClearBits(pEventStruct->event.eventHandler, (event_flags_t)flagsToClear);
   }
-  
+
   return osaStatus_Success;
 #else
   (void)eventId;
-  (void)flagsToClear;  
+  (void)flagsToClear;
   return osaStatus_Error;
-#endif  
+#endif
 }
 
 /*FUNCTION**********************************************************************
@@ -717,8 +782,8 @@ osaStatus_t OSA_EventClear(osaEventId_t eventId, osaEventFlags_t flagsToClear)
  *END**************************************************************************/
 osaStatus_t OSA_EventWait(osaEventId_t eventId, osaEventFlags_t flagsToWait, bool_t waitAll, uint32_t millisec, osaEventFlags_t *pSetFlags)
 {
-#if osNumberOfEvents  
-  osEventStruct_t* pEventStruct; 
+#if osNumberOfEvents
+  osEventStruct_t* pEventStruct;
   BaseType_t clearMode;
   uint32_t timeoutTicks;
   event_flags_t flagsSave;
@@ -726,16 +791,16 @@ osaStatus_t OSA_EventWait(osaEventId_t eventId, osaEventFlags_t flagsToWait, boo
   {
     return osaStatus_Error;
   }
-  
+
   /* Clean FreeRTOS cotrol flags */
   flagsToWait = flagsToWait & 0x00FFFFFF;
-  
-  pEventStruct = (osEventStruct_t*)eventId;  
+
+  pEventStruct = (osEventStruct_t*)eventId;
   if(pEventStruct->event.eventHandler == NULL)
   {
     return osaStatus_Error;
   }
-  
+
   /* Convert timeout from millisecond to tick. */
   if (millisec == osaWaitForever_c)
   {
@@ -745,17 +810,17 @@ osaStatus_t OSA_EventWait(osaEventId_t eventId, osaEventFlags_t flagsToWait, boo
   {
     timeoutTicks = millisec/portTICK_PERIOD_MS;
   }
-  
+
   clearMode = (pEventStruct->event.autoClear) ? pdTRUE: pdFALSE;
-  
+
   flagsSave = xEventGroupWaitBits(pEventStruct->event.eventHandler,(event_flags_t)flagsToWait,clearMode,(BaseType_t)waitAll,timeoutTicks);
-  
+
   flagsSave &= (event_flags_t)flagsToWait;
   if(pSetFlags)
   {
     *pSetFlags = (osaEventFlags_t)flagsSave;
   }
-  
+
   if (flagsSave)
   {
     return osaStatus_Success;
@@ -766,12 +831,12 @@ osaStatus_t OSA_EventWait(osaEventId_t eventId, osaEventFlags_t flagsToWait, boo
   }
 #else
   (void)eventId;
-  (void)flagsToWait;  
-  (void)waitAll;  
-  (void)millisec;  
-  (void)pSetFlags;  
+  (void)flagsToWait;
+  (void)waitAll;
+  (void)millisec;
+  (void)pSetFlags;
   return osaStatus_Error;
-#endif  
+#endif
 }
 
 /*FUNCTION**********************************************************************
@@ -784,8 +849,8 @@ osaStatus_t OSA_EventWait(osaEventId_t eventId, osaEventFlags_t flagsToWait, boo
  *END**************************************************************************/
 osaStatus_t OSA_EventDestroy(osaEventId_t eventId)
 {
-#if osNumberOfEvents    
-  osEventStruct_t* pEventStruct; 
+#if osNumberOfEvents
+  osEventStruct_t* pEventStruct;
   if(osObjectIsAllocated(&osEventInfo, eventId) == FALSE)
   {
     return osaStatus_Error;
@@ -803,7 +868,7 @@ osaStatus_t OSA_EventDestroy(osaEventId_t eventId)
 #else
   (void)eventId;
   return osaStatus_Error;
-#endif  
+#endif
 }
 
 /*FUNCTION**********************************************************************
@@ -817,7 +882,7 @@ osaStatus_t OSA_EventDestroy(osaEventId_t eventId)
 osaMsgQId_t OSA_MsgQCreate( uint32_t  msgNo )
 {
 #if osNumberOfMessageQs
-    msg_queue_handler_t msg_queue_handler; 
+    msg_queue_handler_t msg_queue_handler;
 
     /* Create the message queue where each element is a pointer to the message item. */
     msg_queue_handler = xQueueCreate(msgNo,sizeof(osaMsg_t));
@@ -825,7 +890,7 @@ osaMsgQId_t OSA_MsgQCreate( uint32_t  msgNo )
 #else
     (void)msgNo;
     return NULL;
-#endif  
+#endif
 }
 
 
@@ -838,7 +903,7 @@ osaMsgQId_t OSA_MsgQCreate( uint32_t  msgNo )
  *END**************************************************************************/
 osaStatus_t OSA_MsgQPut(osaMsgQId_t msgQId, void* pMessage)
 {
-#if osNumberOfMessageQs  
+#if osNumberOfMessageQs
   msg_queue_handler_t handler;
   osaStatus_t osaStatus;
   if(msgQId == NULL)
@@ -850,7 +915,7 @@ osaStatus_t OSA_MsgQPut(osaMsgQId_t msgQId, void* pMessage)
     if (__get_IPSR())
     {
       portBASE_TYPE taskToWake = pdFALSE;
-      
+
       if (pdTRUE == xQueueSendToBackFromISR(handler, pMessage, &taskToWake))
       {
         if (pdTRUE == taskToWake)
@@ -863,7 +928,7 @@ osaStatus_t OSA_MsgQPut(osaMsgQId_t msgQId, void* pMessage)
       {
         osaStatus =  osaStatus_Error;
       }
-      
+
     }
     else
     {
@@ -875,7 +940,7 @@ osaStatus_t OSA_MsgQPut(osaMsgQId_t msgQId, void* pMessage)
   (void)msgQId;
   (void)pMessage;
   return osaStatus_Error;
-#endif  
+#endif
 }
 
 /*FUNCTION**********************************************************************
@@ -893,7 +958,7 @@ osaStatus_t OSA_MsgQPut(osaMsgQId_t msgQId, void* pMessage)
  *END**************************************************************************/
 osaStatus_t OSA_MsgQGet(osaMsgQId_t msgQId, void *pMessage, uint32_t millisec)
 {
-#if osNumberOfMessageQs  
+#if osNumberOfMessageQs
   osaStatus_t osaStatus;
   msg_queue_handler_t handler;
   uint32_t timeoutTicks;
@@ -924,7 +989,7 @@ osaStatus_t OSA_MsgQGet(osaMsgQId_t msgQId, void *pMessage, uint32_t millisec)
   (void)pMessage;
   (void)millisec;
   return osaStatus_Error;
-#endif  
+#endif
 }
 
 /*FUNCTION**********************************************************************
@@ -936,7 +1001,7 @@ osaStatus_t OSA_MsgQGet(osaMsgQId_t msgQId, void *pMessage, uint32_t millisec)
  *END**************************************************************************/
 osaStatus_t OSA_MsgQDestroy(osaMsgQId_t msgQId)
 {
-#if osNumberOfMessageQs  
+#if osNumberOfMessageQs
   msg_queue_handler_t handler;
   if(msgQId == NULL )
   {
@@ -948,7 +1013,7 @@ osaStatus_t OSA_MsgQDestroy(osaMsgQId_t msgQId)
 #else
   (void)msgQId;
   return osaStatus_Error;
-#endif  
+#endif
 }
 
 /*FUNCTION**********************************************************************
@@ -1049,7 +1114,7 @@ void OSA_EnableIRQGlobal(void)
     if (gInterruptDisableCount > 0)
     {
         gInterruptDisableCount--;
-        
+
         if (gInterruptDisableCount == 0)
         {
             __enable_irq();
@@ -1068,7 +1133,7 @@ void OSA_DisableIRQGlobal(void)
 {
     /* call core API to disable the global interrupt*/
     __disable_irq();
-    
+
     /* update counter*/
     gInterruptDisableCount++;
 }
@@ -1138,11 +1203,11 @@ int main (void)
 * Object can be semaphore, mutex, message Queue, event
 * \return Pointer to the allocated osObjectStruct_t, NULL if failed.
 *
-* \pre 
+* \pre
 *
 * \post
 *
-* \remarks Function is unprotected from interrupts. 
+* \remarks Function is unprotected from interrupts.
 *
 ********************************************************************************** */
 #if osObjectAlloc_c
@@ -1169,11 +1234,11 @@ static void* osObjectAlloc(const osObjectInfo_t* pOsObjectInfo)
 * Object can be semaphore, mutex,  message Queue, event
 * \return TRUE if the object is valid and allocated, FALSE otherwise
 *
-* \pre 
+* \pre
 *
 * \post
 *
-* \remarks Function is unprotected from interrupts. 
+* \remarks Function is unprotected from interrupts.
 *
 ********************************************************************************** */
 #if osObjectAlloc_c
@@ -1203,11 +1268,11 @@ static bool_t osObjectIsAllocated(const osObjectInfo_t* pOsObjectInfo, void* pOb
 * Object can be semaphore, mutex, message Queue, event
 * \return none.
 *
-* \pre 
+* \pre
 *
 * \post
 *
-* \remarks Function is unprotected from interrupts. 
+* \remarks Function is unprotected from interrupts.
 *
 ********************************************************************************** */
 #if osObjectAlloc_c
@@ -1241,3 +1306,343 @@ void vApplicationMallocFailedHook (void)
 }
 #endif
 
+#if (configSUPPORT_STACK_UNRETAINED == 1)
+
+#define TOP_UNRETAINED_STACK   ((uint32_t*)0x04004000)
+#define ROUND_NB_WORDS(x)      (((x) + sizeof(uint32_t)-1)/sizeof(uint32_t))
+
+#if defined(__IAR_SYSTEMS_ICC__)
+#pragma location = ".rtos.stacks"
+uint32_t rtos_stacks[4];
+static uint32_t *unretained_stack_alloc = &rtos_stacks[0];
+
+#elif defined(__GNUC__) || defined (__CC_ARM)
+extern uint32_t      __rtos_stacks_base;
+extern uint32_t      __top_RAM_Bank0;
+
+uint32_t rtos_stacks[4] __attribute__ ((section (".rtos.stacks")));
+static uint32_t *unretained_stack_alloc = &rtos_stacks[0];
+#endif
+
+
+/*! *********************************************************************************
+* \brief    Application Stack allocator
+*
+* \param[in] size of stack to allocate in number of StackType_t (uint32_t).
+* \param[in] is_idle_task boolean argument telling if the stack to allocate is that of the Idle task.
+*            A special case is handled for IDLE task because it must be saved  entirely, so is allocated
+*            from the standard heap.
+* \return   Pointer on the start of stack (stack base).
+* \remarks  FreeRTOS stacks are allocated in a a potentially unretained RAM bank.
+*
+********************************************************************************** */
+StackType_t * pvApplicationGetTaskStackMemory( size_t TaskStackSize, uint8_t is_idle_task )
+{
+    uint32_t * stack_base= NULL;
+    do {
+        uint32_t * ptr;
+
+        if (is_idle_task != 0)
+        {
+            stack_base = MEM_BufferAllocWithId(TaskStackSize*sizeof(StackType_t), 0u);
+            break;
+        }
+        ptr = unretained_stack_alloc + ROUND_NB_WORDS(TaskStackSize);
+        if (ptr > TOP_UNRETAINED_STACK)
+        {
+            stack_base = NULL;
+            break;
+        }
+        stack_base = unretained_stack_alloc;
+        unretained_stack_alloc = ptr;
+    } while (0);
+    return (StackType_t*)stack_base;
+}
+
+/*
+ * Find a free slot in the compressed_task_stack table
+ */
+static compressed_task_stack_t * AllocateTaskHandle(void)
+{
+    compressed_task_stack_t * hdl = NULL;
+
+    if (nb_tasks_created < MAX_TASK_NB)
+    {
+#if INCLUDE_vTaskDelete /* vTaskDelete() enabled */
+        /* if OSA_TaskDestroy is never used, could be simpler */
+        for (uint8_t i = 0; i < MAX_TASK_NB; i++)
+        {
+            /* Find a free slot */
+            if (task_tb[i].tsk_hdl == NULL)
+            {
+                hdl = &task_tb[i];
+                break;
+            }
+        }
+#else
+        hdl = &task_tb[nb_tasks_created];
+#endif
+        nb_tasks_created ++;
+    }
+    return hdl;
+}
+#ifdef PWR_StackCompressDBG
+static uint32_t pd_cycles = 0;
+static uint32_t wu_cycles = 0;
+#endif
+void vApplicationRegisterNewTaskHandleAndStack(void *tsk_hdl,
+                                               StackType_t *stack_base,
+                                               size_t stack_word_depth)
+{
+    compressed_task_stack_t * hdl = NULL;
+    do {
+        hdl = AllocateTaskHandle();
+        if (hdl == NULL)
+        {
+            assert(hdl != NULL);
+            break;
+        }
+
+        hdl->tsk_hdl = tsk_hdl;
+        hdl->stack_top = stack_base + stack_word_depth;
+    } while (0);
+
+}
+
+#if (DmaMemMove_d != 0)
+
+#define DMA_XFER_DONE 0xf98ed76c
+#define MEM2MEMXFER(_nb_) DMA_CHANNEL_XFER(true, false, false, false, sizeof(uint32_t), kDMA_AddressInterleave1xWidth, kDMA_AddressInterleave1xWidth, (_nb_))
+static const uint32_t xfer_done_pattern = DMA_XFER_DONE;
+volatile static uint32_t xfer_completed[1];
+void OSA_WaitForStackRestoration(void)
+{
+    while (xfer_completed[0] != xfer_done_pattern)
+    {
+    }
+}
+#endif
+
+void OSA_LowPowerCompressStackToRetainedLocation(void)
+{
+    uint8_t i;
+    compressed_task_stack_t * hdl;
+    const uint32_t * srcAddr;
+    uint32_t       *dstAddr;
+    uint32_t retained_sz = 0;
+#ifdef PWR_StackCompressDBG
+    DEBUG_DWT_CYCLE_CNT_START()
+    pd_cycles = 0;
+#endif
+    pd_cnt++;
+#if (DmaMemMove_d != 0)
+    uint8_t nb_dma_desc = 0;
+    dma_descriptor_t *prev_dma_desc = NULL;
+#endif
+    PWR_DBG_LOG("NbTasks=%d PD cnt=%d", nb_tasks_created, pd_cnt);
+
+    for (i = 0; i<nb_tasks_created;i++)
+    {
+       hdl = &task_tb[i];
+#if INCLUDE_vTaskDelete
+       if (hdl->tsk_hdl == NULL)
+           continue;
+#endif
+       /* get point to which stack has currently receded in task */
+       /* known to be first word of TCB */
+       uint32_t stack_used_limit = *(uint32_t*)hdl->tsk_hdl;
+       srcAddr = (const uint32_t*)stack_used_limit;
+       /* Need to retain space between stack_used_limit and stack top i.e stack base + stack size */
+       retained_sz = (uint32_t)hdl->stack_top - stack_used_limit;
+       if (hdl->retained_stk != NULL)
+       {
+           if (hdl->retained_sz < retained_sz)
+           {
+               /* keep same buffer otherwise free current one and allocate new storage */
+               MEM_BufferFree(hdl->retained_stk);
+               hdl->retained_stk = NULL;
+           }
+       }
+       if (hdl->retained_stk == NULL)
+       {
+           hdl->retained_stk = MEM_BufferAllocWithId(retained_sz, 0u);
+           if (hdl->retained_stk == NULL)
+           {
+               assert(0);
+           }
+           hdl->retained_sz = retained_sz;
+       }
+       dstAddr = hdl->retained_stk;
+#if (DmaMemMove_d != 0)
+        if (nb_dma_desc == 0)
+        {
+            DMA_Init(DMA0);
+            DMA_EnableChannel(DMA0, 0);
+            DMA_CreateHandle(&g_DMA_memcpy_handle, DMA0, DMA_MEMCPY_CHANNEL);
+            /* When we want to power down we do not want an IRQ to fire and wake the MCU up again */
+            DMA_DisableChannelInterrupts(DMA0, DMA_MEMCPY_CHANNEL);
+            DMA_SetupDescriptor(
+                    &dma_desc[nb_dma_desc],
+                    MEM2MEMXFER(4u),
+                    &xfer_done_pattern,
+                    (void*)xfer_completed,
+                    NULL); /* Chain DMA transfers backwards */
+            prev_dma_desc = &dma_desc[nb_dma_desc];
+            nb_dma_desc ++;
+        }
+        DMA_SetupDescriptor(
+                &dma_desc[nb_dma_desc],
+                MEM2MEMXFER(retained_sz),
+                srcAddr,
+                dstAddr,
+                prev_dma_desc); /* Chain DMA transfers backwards */
+        stack_words_copied += retained_sz/sizeof(uint32_t);
+        PWR_DBG_LOG("stack=0x%x->0x%x sz=%d", srcAddr, dstAddr, hdl->retained_sz);
+
+        prev_dma_desc = &dma_desc[nb_dma_desc];
+        nb_dma_desc ++;
+#else
+        FLib_MemCpyAligned32bit(dstAddr, (const uint8_t*)srcAddr, hdl->retained_sz);
+
+#endif
+#ifdef StackCorruptionDetect_d
+        SHA256_Hash((const uint8_t*)srcAddr, hdl->retained_sz, hdl->stack_digest);
+#endif
+    }
+#if (DmaMemMove_d != 0)
+    if (nb_dma_desc > 0)
+    {
+        DMA_SubmitChannelDescriptor(&g_DMA_memcpy_handle, &dma_desc[nb_dma_desc-1]);
+        DMA_StartTransfer(&g_DMA_memcpy_handle);
+        OSA_WaitForStackRestoration();
+    }
+
+#endif
+#ifdef PWR_StackCompressDBG
+    DEBUG_DWT_CYCLE_CNT_GET(pd_cycles);
+#endif
+
+
+}
+
+void OSA_LowPowerRestoreStacksToActualLocation(void)
+{
+    uint8_t i;
+    compressed_task_stack_t * hdl;
+    uint32_t stack_used_limit;
+    const uint32_t * srcAddr;
+    uint32_t       *dstAddr;
+#if (DmaMemMove_d != 0)
+    uint8_t nb_dma_desc = 0;
+#endif
+#if (DmaMemMove_d != 0)
+    dma_descriptor_t *prev_dma_desc = NULL;
+#endif
+    PWR_DBG_LOG("WU cnt=%d stack_words_copied=%d", wu_cnt, stack_words_copied);
+
+    if (stack_words_copied != 0u)
+    {
+    	stack_words_restored = 0u;
+        wu_cnt++;
+        if (wu_cnt != pd_cnt)
+        {
+            assert(0);
+        }
+#ifdef PWR_StackCompressDBG
+        DEBUG_DWT_CYCLE_CNT_START()
+        wu_cycles = 0;
+#endif
+        for (i = 0; i<nb_tasks_created;i++)
+        {
+            hdl = &task_tb[i];
+#if INCLUDE_vTaskDelete /* vTaskDelete() enabled */
+            if (hdl->tsk_hdl == NULL)
+                continue;
+#endif
+            stack_used_limit = *(uint32_t*)hdl->tsk_hdl; /* points to pxTopOfStack */
+            dstAddr = (uint32_t*)stack_used_limit;
+            srcAddr = hdl->retained_stk;
+
+#if (DmaMemMove_d != 0)
+            if (nb_dma_desc == 0)
+            {
+                DMA_Init(DMA0);
+                DMA_EnableChannel(DMA0, 0);
+                DMA_CreateHandle(&g_DMA_memcpy_handle, DMA0, DMA_MEMCPY_CHANNEL);
+                /* When we want to power down we do not want an IRQ to fire and wake the MCU up again */
+                DMA_DisableChannelInterrupts(DMA0, DMA_MEMCPY_CHANNEL);
+                xfer_completed[0] = ~xfer_done_pattern;
+                DMA_SetupDescriptor(&dma_desc[nb_dma_desc],
+                					MEM2MEMXFER(4u),
+									&xfer_done_pattern,
+									(void*)xfer_completed,
+									NULL); /* Chain DMA transfers backwards */
+                prev_dma_desc = &dma_desc[nb_dma_desc];
+                nb_dma_desc ++;
+            }
+            DMA_SetupDescriptor(&dma_desc[nb_dma_desc],
+            					MEM2MEMXFER(hdl->retained_sz),
+								srcAddr,
+								dstAddr,
+								prev_dma_desc); /* Chain DMA transfers backwards */
+            PWR_DBG_LOG("stack=0x%x<-0x%x sz=%d",  dstAddr, srcAddr, hdl->retained_sz);
+            prev_dma_desc = &dma_desc[nb_dma_desc];
+            nb_dma_desc ++;
+#else
+            FLib_MemCpyAligned32bit(dstAddr, srcAddr, hdl->retained_sz);
+#endif
+            stack_words_restored += hdl->retained_sz/sizeof(uint32_t);
+
+        }
+        assert(stack_words_copied == stack_words_restored);
+        stack_words_copied = 0;
+#if (DmaMemMove_d != 0)
+        DMA_SubmitChannelDescriptor(&g_DMA_memcpy_handle, &dma_desc[nb_dma_desc-1]);
+        DMA_StartTransfer(&g_DMA_memcpy_handle);
+        OSA_WaitForStackRestoration();
+#endif
+
+#ifdef StackCorruptionDetect_d
+        uint8_t digest[SHA256_HASH_SIZE];
+        for (i = 0; i<nb_tasks_created;i++)
+        {
+           hdl = &task_tb[i];
+#if INCLUDE_vTaskDelete /* vTaskDelete() enabled */
+           if (hdl->tsk_hdl == NULL)
+               continue;
+#endif
+           stack_used_limit = *(uint32_t*)hdl->tsk_hdl; /* points to pxTopOfStack */
+           dstAddr = (uint32_t*)stack_used_limit;
+           srcAddr = hdl->retained_stk;
+           SHA256_Hash((const uint8_t*)dstAddr, hdl->retained_sz, digest);
+           if (!FLib_MemCmp(digest, hdl->stack_digest, SHA256_HASH_SIZE))
+           {
+        	   assert(0);
+           }
+        }
+#endif
+#ifdef PWR_StackCompressDBG
+        DEBUG_DWT_CYCLE_CNT_GET(wu_cycles);
+        PWR_DBG_LOG("WU stack cycles=%d", wu_cycles);
+#endif
+    }
+    else
+    {
+#ifdef PWR_StackCompressDBG
+    	/* If stack retention is supposed to be on it is ok, otherwise it denotes of an error */
+    	uint32_t stack_retention = PWR_u32GetRamRetention() & 0x00000001u;
+        if (!stack_retention)
+        {
+    		DbgLogDump(true);
+    	}
+        if ( (*(uint32_t*)0x04000800 != 0x12345678) ||
+        		(*(uint32_t*)0x04000804 != 0x9abcdef0))
+        {
+        	assert(0);
+        }
+#endif
+    }
+}
+
+
+#endif

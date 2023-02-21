@@ -51,6 +51,8 @@ extern "C" {
 #define PWR_CFG_RAM_OFF         (0x08)
 #define PWR_CFG_OSC_ON          (0x10)
 #define PWR_CFG_OSC_OFF         (0x20)
+#define PWR_CFG_TMR_OFF         (0x40)
+
 
 /* Bitfield values that can be passed to PWR_vWakeUpConfig */
 #define PWR_NTAG_FD_WAKEUP    ( 1 << 22 ) /** wakeup from NTAG field detect interrupt */
@@ -125,10 +127,11 @@ typedef void ( *pfPWRCallBack_t ) (void);
  */
 typedef enum
 {
-    PWR_E_SLEEP_OSCON_RAMON   = 1,  /*32Khz Osc on and Ram On*/
-	PWR_E_SLEEP_OSCON_RAMOFF  = 2,  /*32Khz Osc on and Ram off*/
-	PWR_E_SLEEP_OSCOFF_RAMON  = 5,  /*32Khz Osc off and Ram on*/
-	PWR_E_SLEEP_OSCOFF_RAMOFF = 6,  /*32Khz Osc off and Ram off*/
+    PWR_E_SLEEP_OSCON_RAMON          = 1,  /*32Khz Osc on and Ram On*/
+	PWR_E_SLEEP_OSCON_RAMOFF         = 2,  /*32Khz Osc on and Ram off see cPWR_DeepSleep_RamOffOsc32kOn */
+	PWR_E_SLEEP_OSCOFF_RAMON         = 5,  /*32Khz Osc off and Ram on see cPWR_DeepSleep_RamOnOsc32kOff */
+	PWR_E_SLEEP_OSCOFF_RAMOFF        = 6,  /*32Khz Osc off and Ram off see cPWR_DeepSleep_RamOffOsc32kOff2 */
+	PWR_E_SLEEP_OSCON_RAMOFF_TMROFF  = 7,  /*32Khz Osc on and Ram off all Timers stopped see cPWR_DeepSleep_RamOffOsc32kOnTimersOff */
 	PWR_E_SLEEP_INVALID,
 } tePWR_SleepMode;
 
@@ -522,8 +525,8 @@ uint32_t PWR_u32GetRamRetention(void);
 void PWR_vForceRadioRetention(bool_t bRetain);
 
 /**
- * Reset Lowpower Mode config
- * to be called when lower configuration to go to powerdown with RAM On has changed
+ * Reset Lowpower Mode configuration
+ * to be called when lower configuration to go to Power Down with RAM On has changed
  */
 void PWR_ResetPowerDownModeConfig(void);
 
@@ -533,8 +536,10 @@ void PWR_Start32kCounter(void);
 uint32_t PWR_Get32kTimestamp(void);
 
 
-
 /* <--Added for freeRTOS tickless mode */
+
+
+
 
 #ifdef __cplusplus
 }

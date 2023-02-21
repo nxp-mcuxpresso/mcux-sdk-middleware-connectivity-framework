@@ -12,13 +12,10 @@
 
 #include "SecLib.h"
 
-#if defined CORE_OPT && (CORE_OPT == m4_dspext)
-#define EC_P256_DSPEXT 1
-#else
 #ifndef EC_P256_DSPEXT
-#define EC_P256_DSPEXT 0
+#define EC_P256_DSPEXT 1
 #endif
-#endif
+
 /*! Type qualifier - does not affect local variables of integral type */
 #ifndef PACKED_STRUCT
 #if defined(__GNUC__)
@@ -80,7 +77,7 @@ typedef enum ecp256Status_t {
     gSecEcp256InvalidPrivateKey_c,
     gSecEcp256InvalidPoint_c,
     gSecEcp256InvalidScalar_c,
-    gSecEcp256NeutralPoint_c 
+    gSecEcp256NeutralPoint_c
 } secEcp256Status_t;
 
 typedef union big_int256_t {
@@ -372,6 +369,7 @@ secEcdsaStatus_t ECDSA_VerifySignature(
     const uint8_t     *pSignature
 );
 
+
 /**
  * @brief ECDSA message signature verification
  *
@@ -390,7 +388,7 @@ secEcdsaStatus_t ECDSA_VerifySignature(
  * @retval gSecEcdsaInvalidPoint_c       The passed public key is invalid.
  *
  */
-secEcdsaStatus_t ECDSA_Verify_message_signature
+secEcdsaStatus_t ECDSA_VerifyMessageSignature
 (
     const uint8_t pSignature[ECP256_COORDINATE_LEN*2],
     const uint8_t *msg,

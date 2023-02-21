@@ -217,6 +217,12 @@ typedef enum {
     gTmrOutOfRange_c
 }tmrErrCode_t;
 
+typedef enum {
+    gFroCalibrationInactive_c,
+    gFro32kCalibration_c,
+    gFro48MCalibration_c
+}tmrFroCalibrationState_t;
+
 /*
  * \brief   16-bit timer ticks type definition
  */
@@ -901,19 +907,42 @@ void FRO32K_Init(void);
 
 /*---------------------------------------------------------------------------
  * Name: FRO32K_StartCalibration
- * Description: -
- * Parameters: -
- * Return: -
+ *   It is supposed that 32MHz crystal is running and FRO32K running when calling this API
+ *   FRO32K calibration shall be called idealy from Idle Task
+ *   If Calibration on FRO48Mhz has started, this last shall be completed before
+ *      starting FRO32K calibration as it uses the same Hardware module
+ * Parameters: - None
+ * Return: - None
  *---------------------------------------------------------------------------*/
 void FRO32K_StartCalibration(void);
 
 /*---------------------------------------------------------------------------
  * Name: FRO32K_CompleteCalibration
  * Description: -
- * Parameters: -
- * Return: - 0 if calibration is not completed, new frequency measurement
+ * Parameters: - None
+ * Return: - 0 if calibration is not completed, new frequency measurement in unit
+ *       of 1/(2^freq_scale)th of Hertz for higher accuracy
  *---------------------------------------------------------------------------*/
 uint32_t FRO32K_CompleteCalibration(void);
+
+/*---------------------------------------------------------------------------
+ * Name: FRO48M_StartCalibration
+ *   It is supposed that 32MHz crystal is running when calling this API
+ *   FRO48M calibration shall be called idealy from Idle Task.
+ *   If Calibration on FRO32K has started,this last shall be completed before
+ *     starting FRO48M calibration as it uses the same Hardware module
+ * Parameters: - None
+ * Return: - None
+ *---------------------------------------------------------------------------*/
+void FRO48M_StartCalibration(void);
+
+/*---------------------------------------------------------------------------
+ * Name: FRO48M_CompleteCalibration
+ * Description: -
+ * Parameters: -
+ * Return: - 0 if calibration is not completed, new frequency measurement in Hertz
+ *---------------------------------------------------------------------------*/
+uint32_t FRO48M_CompleteCalibration(void);
 
 /*---------------------------------------------------------------------------
  * Name: TMR_Convert32kTicks2Us

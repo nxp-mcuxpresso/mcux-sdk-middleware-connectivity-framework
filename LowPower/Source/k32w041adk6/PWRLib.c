@@ -1,6 +1,6 @@
 /*! *********************************************************************************
 * Copyright (c) 2015, Freescale Semiconductor, Inc.
-* Copyright 2016-2017, 2019-2020 NXP
+* Copyright 2016-2017, 2019-2020, 2022 NXP
 * All rights reserved.
 *
 * \file
@@ -20,13 +20,14 @@
 #include "PWRLib.h"
 #include "PWR_Configuration.h"
 #include "TimersManager.h"
+#include "MemManager.h"
 #include "fsl_os_abstraction.h"
+
 #include "GPIO_Adapter.h"
 #include "fsl_power.h"
 #include "rom_lowpower.h"
 #include "fsl_flash.h"
 #include "board_utility.h"
-
 #ifndef LpIoSet
 #define LpIoSet(x, y)
 #endif
@@ -55,18 +56,48 @@ extern uint32_t                   _end_boot_resume_stack;
   #endif
 #endif
 
+#if !defined(gMemManagerLight) || (gMemManagerLight == 0)
 #if defined(__IAR_SYSTEMS_ICC__)
 #pragma location = ".s_end_fw_retention"
 static uint32_t                   _end_fw_retention;
 #pragma section="HEAP"
 #define heapStartAddr (uint32_t)__section_begin("HEAP")
 #define heapEndAddr   (uint32_t)__section_end("HEAP")
-#else
+#else /* gcc */
 extern uint32_t                   _end_fw_retention;
 extern uint32_t                   _pvHeapStart;
 extern uint32_t                   _pvHeapLimit;
 #define heapStartAddr (uint32_t)&_pvHeapStart
 #define heapEndAddr   (uint32_t)&_pvHeapLimit
+#endif
+#else /* gMemManagerLight */
+#if defined(__IAR_SYSTEMS_ICC__)
+#pragma location = ".heap"
+static uint32_t                   __HEAP_start__;
+#pragma section="HEAP"
+#define heapStartAddr (uint32_t)__section_begin("HEAP")
+#define heapEndAddr   (uint32_t)__section_end("HEAP")
+#else /* gcc */
+extern uint32_t                   __HEAP_start__;
+#define heapStartAddr   (uint32_t)&__HEAP_start__
+#endif
+#endif
+
+#if defined PWR_StackCompressionRetention_d && (PWR_StackCompressionRetention_d != 0)
+/* Defines number of milliseconds of power down time from which it
+ * becomes worthwhile compressing the stacks: the copy back and forth between
+ * unretained and retained RAM banks has a linear energy cost.
+ * Shutting down the 16kB RAM Bank holding the stacks saves 420nA while in power down mode
+ * with RAM retention on. The energy to perform these data movements
+ * at Power Down time and on Wake up is dependent on the number of tasks in
+ * and the stack depths at the time of power down.
+ * The power budget of the stack compression operation remains positive as long as the
+ * energy for the copy is less than that for the retention of the Bank0 for the default  duration
+ * defined by the constant below. May be tuned in app_preinclude.h 
+ */
+#ifndef PWR_StackCompressionDurationMsThreshold
+#define PWR_StackCompressionDurationMsThreshold       3000u
+#endif
 #endif
 
 #if gSupportBle
@@ -173,6 +204,12 @@ const sram_bank_desc_t pm_sram1_bank_desc[] =
  *****************************************************************************/
 static uint8_t mPWRLib_DeepSleepMode = 0;
 
+static uint32_t lowpower_power_cfg[POWER_LOWPOWER_STRUCTURE_SIZE];
+static void *lowpower_power_cfg_p = NULL;
+
+#if defined PWR_StackCompressionRetention_d && (PWR_StackCompressionRetention_d != 0)
+static volatile uint32_t time_to_next_expected_wakeup = ~0UL; /* time to next programmed activity in msec*/
+#endif
 /*****************************************************************************
  *                               PUBLIC VARIABLES                            *
  *---------------------------------------------------------------------------*
@@ -326,68 +363,99 @@ void PWRLib_Init(void)
 {
 }
 
+#if defined PWR_StackCompressionRetention_d && (PWR_StackCompressionRetention_d != 0)
+void PWR_SetProgrammedDeadline(uint32_t time_msec)
+{
+    if (time_msec < time_to_next_expected_wakeup)
+    {
+        time_to_next_expected_wakeup = time_msec;
+    }
+}
+#endif
+
 static uint32_t PWRLib_SetRamBanksRetention(void)
 {
     uint32_t bank_mask = 0;
-    register uint32_t stack_top;
-    GET_MSP(stack_top);
-
-    if ( bank_mask == 0 )
-    {
-        /*  retrieve HEAP limits */
-
-        /* Set retention for all data from start of SRAM0 up to retention limit */
-        /* Assess the RAM banks to be held in sleep mode based on _end_fw_retention
-         * linker script symbol.
-         * */
-        bank_mask |= PWRLib_u32RamBanksSpanned(pm_sram0_bank_desc[0].start_address,
-                                               (uint32_t)&_end_fw_retention - pm_sram0_bank_desc[0].start_address);
-
-        /*
-         * If the retention policy is to conserve RAM from bottom to end_of_fw_retention.
-         */
-        int32_t heap_sz = (heapEndAddr - heapStartAddr);
-
-        if (heap_sz > 0)
-        {
-            bank_mask |= PWRLib_u32RamBanksSpanned(heapStartAddr, heap_sz);
-        }
-        /* SRAM0 bank 7 must be held in retention no matter how other data are mapped because the 32 bytes of
-         * boot persistent data need to be preserved and it dwells at the top of bank7 @0x04015fe0.
-         * Consequently the remainder of SRAM0 bank7 will be retained.
-         * The top of the stack of the Startup Task (with RTOS) or of the bare metal thread,
-         * is usually anchored at the bottom of the boot interface data @0x04015fe0 to grow downwards.
-         * However, the implementer may chose to place this stack at the border of the preceding bank (bank6),
-         * indeed only the top of the Startup task need to be retained. In that case, there would be a benefit
-         * to place hand-picked data in the ~3.5kbyte space between the top of this stack and the bottom of the
-         * boot persistent data.
-         * The SP position at Power Down time need to be evaluated at run-time. So retention mask may be amended
-         * later.
-         * */
-        bank_mask |= PWRLib_u32RamBanksSpanned(PWR_SRAM0_END-32, 32);
-
-        /* PM_CFG_SRAM_ALL_RETENTION can be used to set all SRAM banks in retention */
-#if gLoggingActive_d
-        /* Usually the log ring is occupying the remainder of the available space in SRAM1 till
-         * top. Anyhow it needs to be held in retention
-         * */
-        uint32_t log_ring_addr;
-        uint32_t log_ring_sz;
-        DbgLogGetStartAddrAndSize(&log_ring_addr, &log_ring_sz);
-
-        if (log_ring_sz!= 0)
-        {
-            bank_mask |= PWRLib_u32RamBanksSpanned(log_ring_addr, log_ring_sz);
-        }
+#if !defined FSL_RTOS_FREE_RTOS || (FSL_RTOS_FREE_RTOS == 0)
+    register uint32_t stack_bottom;
+    GET_MSP(stack_bottom);
 #endif
-        /* Need to keep the startup task's stack in retention down to current stack position */
-        /* The most part of the retained mask has already been set at PWR_Init call but the stack
-         * pointer might have gone past the bottom of the original bank */
-        if (stack_top < PWR_SRAM0_BANK7_START_ADDR)
-        {
-            bank_mask |= PWRLib_u32RamBanksSpanned(stack_top, PWR_SRAM0_END-stack_top);
-        }
+
+
+    /* Set retention for all data from start of SRAM0 up to retention limit */
+    /* Assess the RAM banks to be held in sleep mode based on _end_fw_retention
+     * linker script symbol.
+         * */
+    /*  retrieve HEAP limits */
+    uint32_t top_retained_area;
+    int32_t heap_sz;
+#if defined(gMemManagerLight) && (gMemManagerLight != 0)
+    top_retained_area =  MEM_GetHeapUpperLimit();
+    heap_sz = top_retained_area - heapStartAddr;
+#else
+    top_retained_area = (uint32_t)&_end_fw_retention;
+    heap_sz = (heapEndAddr - heapStartAddr);
+#endif
+    uint32_t start_retention;
+#if defined(gMemManagerLight) && (gMemManagerLight != 0)
+    start_retention = pm_sram0_bank_desc[1].start_address;
+#else
+    start_retention = pm_sram0_bank_desc[0].start_address;
+#endif
+
+    bank_mask |= PWRLib_u32RamBanksSpanned(start_retention,
+                                               top_retained_area - start_retention);
+
+    /*
+     * If the retention policy is to conserve RAM from bottom to end_of_fw_retention.
+     */
+    if (heap_sz > 0)
+    {
+    	bank_mask |= PWRLib_u32RamBanksSpanned(heapStartAddr, heap_sz);
     }
+    /* SRAM0 bank 7 must be held in retention no matter how other data are mapped because the 32 bytes of
+     * boot persistent data need to be preserved and it dwells at the top of bank7 @0x04015fe0.
+     * Consequently the remainder of SRAM0 bank7 will be retained.
+     * The top of the stack of the Startup Task (with RTOS) or of the bare metal thread,
+     * is usually anchored at the bottom of the boot interface data @0x04015fe0 to grow downwards.
+     * However, the implementer may chose to place this stack at the border of the preceding bank (bank6),
+     * indeed only the top of the Startup task need to be retained. In that case, there would be a benefit
+     * to place hand-picked data in the ~3.5kbyte space between the top of this stack and the bottom of the
+     * boot persistent data.
+     * The SP position at Power Down time need to be evaluated at run-time. So retention mask may be amended
+     * later.
+     * */
+    bank_mask |= PWRLib_u32RamBanksSpanned(PWR_SRAM0_END-32, 32);
+
+    /* PM_CFG_SRAM_ALL_RETENTION can be used to set all SRAM banks in retention */
+#if gLoggingActive_d
+    /* Usually the log ring is occupying the remainder of the available space in SRAM1 till
+     * top. Anyhow it needs to be held in retention
+     * */
+    uint32_t log_ring_addr;
+    uint32_t log_ring_sz;
+    DbgLogGetStartAddrAndSize(&log_ring_addr, &log_ring_sz);
+
+    if (log_ring_sz!= 0)
+    {
+    	bank_mask |= PWRLib_u32RamBanksSpanned(log_ring_addr, log_ring_sz);
+    }
+#endif
+#if !defined FSL_RTOS_FREE_RTOS || (FSL_RTOS_FREE_RTOS == 0)
+    /* Need to keep the startup task's stack in retention down to current stack position */
+    /* The most part of the retained mask has already been set at PWR_Init call but the stack
+     * pointer might have gone past the bottom of the original bank */
+    if (stack_bottom < PWR_SRAM0_BANK1_START_ADDR)
+    {
+    	bank_mask |= 0x001;
+    	/* Force bank 0 into retention in the unholy case where it is going too deep.
+    	 * The stack top placement should be tuned in a a way such that this never happens.
+    	 * Thence the assert in debug only.
+    	 * */
+    	assert(0);
+    }
+#endif
+
     return bank_mask;
 }
 
@@ -403,7 +471,8 @@ void PWRLib_SetDeepSleepMode(uint8_t lpMode)
 #if gSupportBle
     if (lpMode == cPWR_DeepSleep_RamOffOsc32kOn ||
          lpMode == cPWR_PowerDown_RamRet ||
-         lpMode == cPWR_DeepSleep_RamOffOsc32kOff)
+         lpMode == cPWR_DeepSleep_RamOffOsc32kOff ||
+		 lpMode == cPWR_DeepSleep_RamOffOsc32kOnTimersOff)
         BLE_enable_sleep();
     else
         BLE_disable_sleep();
@@ -524,14 +593,17 @@ void PWRLib_MCU_Enter_Sleep(void)
 
 #if defined (gPWR_FreqScalingWFI) && (gPWR_FreqScalingWFI != 0 )
     uint32_t save_MAINCLKSEL = SYSCON -> MAINCLKSEL;
-    uint32_t save_AHBCLKDIV = SYSCON->AHBCLKDIV;
-#if (gPWR_FreqScalingWFI < 24 )
+    uint32_t save_AHBCLKDIV  = SYSCON->AHBCLKDIV;
     uint32_t save_radio_timing = BLE_RADIOPWRUPDN_REG;
-    RadioTimingTweakForFrequencyScaling();
-#endif
-    ChangeFrequencyBeforeWfi();
-#endif
+    if(BLE_GetNbActiveLink() == 0U)
+    {
 
+#if (gPWR_FreqScalingWFI < 24 )
+        RadioTimingTweakForFrequencyScaling();
+#endif
+        ChangeFrequencyBeforeWfi();
+    }
+#endif
 #if gPWR_FlashControllerPowerDownInWFI
     if ( mLPMFlag==0 )
     {
@@ -562,29 +634,32 @@ void PWRLib_MCU_Enter_Sleep(void)
 #endif
 
 #if defined gPWR_FreqScalingWFI && (gPWR_FreqScalingWFI > 0)
+    if(BLE_GetNbActiveLink() == 0U)
+    {
   #if gPWR_LdoVoltDynamic
 
-    /* Need to increase LDO voltage before increasing CPU clock */
-    POWER_ApplyLdoActiveVoltage_1V1();
+        /* Need to increase LDO voltage before increasing CPU clock */
+        POWER_ApplyLdoActiveVoltage_1V1();
 
-    /* wait for LDO voltage to reach the voltage setting */
-    /* This is still run at reduced frequency!
-     *  CLOCK_uDelay is not usable at very slow clocks < 8MHz because the number of
-     * instructions that is unrolls is huge. At 2MHz the 10us delay is only 20 CPU cycles.
-     * DelayUsecMHz is merely a 4 cycle NOP loop. This yields a relatively good accuracy.
-     * */
-    //DelayUsecMHz(10U, gPWR_FreqScalingWFI );
-    DelayLoopN( (10U * gPWR_FreqScalingWFI) / 4 );
+        /* wait for LDO voltage to reach the voltage setting */
+        /* This is still run at reduced frequency!
+         *  CLOCK_uDelay is not usable at very slow clocks < 8MHz because the number of
+         * instructions that is unrolls is huge. At 2MHz the 10us delay is only 20 CPU cycles.
+         * DelayUsecMHz is merely a 4 cycle NOP loop. This yields a relatively good accuracy.
+         * */
+        //DelayUsecMHz(10U, gPWR_FreqScalingWFI );
+        DelayLoopN( (10U * gPWR_FreqScalingWFI) / 4 );
   #endif
 
-    RestoreCoreFrequencyAfterSleep(save_MAINCLKSEL, save_AHBCLKDIV);
+        RestoreCoreFrequencyAfterSleep(save_MAINCLKSEL, save_AHBCLKDIV);
   #if (gPWR_FreqScalingWFI < 24 )
-    BLE_RADIOPWRUPDN_REG = save_radio_timing;
+        BLE_RADIOPWRUPDN_REG = save_radio_timing;
   #endif
 
   #if gPWR_LdoVoltDynamic
-    POWER_ApplyLdoActiveVoltage_1V0();
+        POWER_ApplyLdoActiveVoltage_1V0();
   #endif
+    }
 #endif
 
     LpIoSet(0, 1);
@@ -834,22 +909,20 @@ PWR_WakeupReason_t PWR_GetWakeupReason(void)
     return PWRLib_MCU_WakeupReason;
 }
 
-
 void WarmMain(void)
 {
     /* Interrupts should be disabled */
     __disable_irq();
+
 #if defined(USE_RTOS) && (USE_RTOS)
     /* Switch to the psp stack */
     asm volatile("movs r0, #2");
     asm volatile("msr CONTROL, r0");
- #endif
+#endif
     // Restore context
     PWR_longjmp(pwr_CPUContext, TRUE);
 }
 
-uint32_t lowpower_power_cfg[POWER_LOWPOWER_STRUCTURE_SIZE];
-void *lowpower_power_cfg_p = NULL;
 
 void PWR_ResetPowerDownModeConfig(void)
 {
@@ -892,11 +965,42 @@ static void PWRLib_LLDsmComplete(void)
 void PWRLib_EnterPowerDownModeRamOn(uint32_t mode)
 {
     //PWR_DBG_LOG("");
+
     pm_power_config_t power_config;
     uint32_t pwrlib_pm_ram_config;
-
 #if !defined(gPWR_LpEntryStructOptim) || (gPWR_LpEntryStructOptim == 0)
     lowpower_power_cfg_p = NULL;
+#endif
+
+#if defined PWR_StackCompressionRetention_d && (PWR_StackCompressionRetention_d != 0)
+#if !defined (FSL_RTOS_FREE_RTOS) || (FSL_RTOS_FREE_RTOS == 0)
+#error "PWR_StackCompressionRetention_d can only be used in conjunction with RTOS"
+#endif
+    if (time_to_next_expected_wakeup >= PWR_StackCompressionDurationMsThreshold)
+    {
+        /* We can save the stacks safely here because until Power Down execution runs on
+         * the Idle Task Stack that is retained anyway.
+         * Cancel retention of Bank0 and do limited copy to other retained region.
+         * */
+    	PWR_vStackRetentionBank0(false);
+        OSA_LowPowerCompressStackToRetainedLocation();
+    }
+    else
+    {
+        /* Force retention of Bank0 where stacks are located */
+    	PWR_vStackRetentionBank0(true);
+#ifdef PWR_StackCompressDBG
+    	*(uint32_t*)0x04000800 = 0x12345678;
+    	*(uint32_t*)0x04000804 = 0x9abcdef0;
+#endif
+
+        PWR_DBG_LOG("Stacks retained time=%d", time_to_next_expected_wakeup);
+
+    }
+
+    /* Reset time_to_next_expected_wakeup now that decision was taken */
+    time_to_next_expected_wakeup = ~0UL;
+
 #endif
 
     if ( lowpower_power_cfg_p == NULL )
@@ -958,7 +1062,6 @@ void PWRLib_EnterPowerDownModeRamOn(uint32_t mode)
         POWER_GetPowerDownConfig(&power_config, lowpower_power_cfg_p);
         POWER_RegisterPowerDownEntryHookFunction( PWRLib_LLDsmComplete );
     }
-
     BOOT_SetResumeStackPointer(RESUME_STACK_POINTER);
 
     /* on application warm start, prevent the application from corrupting the current stack */
@@ -971,6 +1074,7 @@ void PWRLib_EnterPowerDownModeRamOn(uint32_t mode)
     {
         POWER_GoToPowerDown( lowpower_power_cfg_p );
     }
+
 }
 
 void PWRLib_EnterPowerDownModeRamOff(pwrlib_pd_cfg_t *pd_cfg)

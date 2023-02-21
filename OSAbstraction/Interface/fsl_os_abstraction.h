@@ -15,6 +15,10 @@
 #include "EmbeddedTypes.h"
 #include "fsl_os_abstraction_config.h"
 
+#if defined FSL_RTOS_FREE_RTOS && (FSL_RTOS_FREE_RTOS != 0)
+#include "fsl_os_abstraction_free_rtos.h"
+#endif
+
 #ifdef  __cplusplus
 extern "C"
 {
@@ -632,6 +636,7 @@ void OSA_TimeInit(void);
  * @retval FALSE Current context is not inside an ISR.
  */
 bool_t OSA_InIsrContext(void);
+
 
 #ifdef  __cplusplus
 }

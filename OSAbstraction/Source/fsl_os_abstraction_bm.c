@@ -128,7 +128,7 @@ const uint8_t gUseRtos_c = USE_RTOS;  /* USE_RTOS = 0 for BareMetal and 1 for OS
 *************************************************************************************
 ********************************************************************************** */
 
-list_t threadList;
+//list_t threadList;
 
 #if osNumberOfSemaphores
 osSemaphoreStruct_t osSemaphoreHeap[osNumberOfSemaphores];

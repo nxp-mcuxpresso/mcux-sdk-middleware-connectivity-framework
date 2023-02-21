@@ -175,4 +175,37 @@ uint32_t PWR_GetWakeUpConfig(void);
 void vSetWakeUpIoConfig(void);
 uint64_t u64GetWakeupSourceConfig(uint32_t u32Mode);
 
+/*!
+ * Name : PWR_SetProgrammedDeadline
+ * Description: Set the deadline to next programmed wakeup.
+ *
+ * Internal API called before powering down with RAM retention On.
+ * The sources of programmed wakeup can come from WTIMER, RTC or BLE events.
+ * The shortest of these expected event is stored in @ref time_to_next_expected_wakeup.
+ * The decision to retain the stack bank is taken by comparing time_to_next_expected_wakeup
+ * against a preset threshold.
+ *
+ * Parameters: time_msec number of milliseconds to next programmed activity.
+ *
+ * Note: internal API added for freeRTOS stack retention optimization:
+ * do not save stacks if power budget to save / restore is higher than RAM bank retention saving.
+ *  i.e. 420nA for 16kB or 210nA for 8kB.
+ **/
+void PWR_SetProgrammedDeadline(uint32_t time_msec);
+
+/*!
+ * Name : PWR_vStackRetentionBank0
+ *
+ * Description: Set Ba
+ *
+ * Internal API called before to request or not Bank0 retention, assuming FreeRTOS
+ * stacks are collocated in Bank0.
+ *
+ * Parameters: SetnClr if TRUE requests to keep Bank0 in retention, if FALSE, need to save top of
+ * stack in retained area and forsake the bottom of the tasks stacks.
+ *
+ **/
+bool_t PWR_vStackRetentionBank0(bool_t SetnClr);
+
+
 #endif /* __PWR_LIB_H__ */

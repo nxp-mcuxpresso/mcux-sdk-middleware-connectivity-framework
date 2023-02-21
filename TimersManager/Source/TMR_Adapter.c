@@ -156,6 +156,8 @@ static const tpm_config_t mTpmConfig = {
 };
 #endif
 
+static tmrFroCalibrationState_t froCalibrationState = gFroCalibrationInactive_c;
+
 #ifdef CPU_JN518X
 #if 0
 #if (BOARD_TARGET_CPU_FREQ != BOARD_MAINCLK_XTAL32M) && !gClkUseFro32K
@@ -593,7 +595,6 @@ void StackTimer_PrePowerDownWakeCounterSet(uint32_t expected_suppressed_ticks)
     {
         Systick_EstimateCoreClockFreq();
         SYSTICK_DBG_LOG("CoreFreq is %d",  SysTick_lp_ctx.estimated_core_freq);
-
     }
 #endif
     TMR_DBG_LOG("expected_idle_time_ms=%d tmrMgrExpiryCnt=%d", expected_idle_time_ms, SysTick_lp_ctx.original_tmr_value);
@@ -680,38 +681,12 @@ void SysTickSetCal(bool on_noff)
 /* suppose 32MHz crystal is running and FRO48M running */
 void SysTick_StartFroCalibration(void)
 {
-    INPUTMUX_Init(INPUTMUX);
-
-    /* Setup to measure the selected target */
-    INPUTMUX_AttachSignal(INPUTMUX, 1U, kINPUTMUX_Xtal32MhzToFreqmeas);
-    INPUTMUX_AttachSignal(INPUTMUX, 0U, kINPUTMUX_MainClkToFreqmeas);
-
-    CLOCK_EnableClock(kCLOCK_Fmeas);
-
-    /* Start a measurement cycle and wait for it to complete. If the target
-       clock is not running, the measurement cycle will remain active
-       forever, so a timeout may be necessary if the target clock can stop */
-    FMEAS_StartMeasureWithScale(FMEAS_SYSCON, 17);
+    FRO48M_StartCalibration();
 }
 
 uint32_t SysTick_CompleteFroCalibration(void)
 {
-    uint32_t        freqComp    = 0U;
-    uint32_t        refCount    = 0U;
-    uint32_t        targetCount = 0U;
-    uint32_t        freqRef     = CLOCK_GetFreq(kCLOCK_Xtal32M);
-
-    if (FMEAS_IsMeasureComplete(FMEAS_SYSCON))
-    {
-        /* Wait 2^17 counts of the reference clock : 4096us */
-        /* Get computed frequency */
-        FMEAS_GetCountWithScale(FMEAS_SYSCON, 17, &refCount, &targetCount);
-        freqComp = (uint32_t)(((((uint64_t)freqRef)*refCount)) / targetCount);
-
-        /* Disable the clocks if disable previously */
-        CLOCK_DisableClock(kCLOCK_Fmeas);
-    }
-    return freqComp;
+    return FRO48M_CompleteCalibration();
 }
 
 
@@ -720,11 +695,19 @@ void Systick_EstimateCoreClockFreq(void)
     if (SysTick_lp_ctx.cal_ongoing)
     {
         uint32_t core_freq = SysTick_CompleteFroCalibration();
+
         if (core_freq != 0)
         {
-            SysTick_lp_ctx.estimated_core_freq = (uint32_t)core_freq;
-            SysTick_GetCoreFreqTickReloadValue(); /* Sets TickCountForOneTick */
-            TMR_DBG_LOG("core_freq=%d", SysTick_lp_ctx.estimated_core_freq);
+            if (core_freq != 0xFFFFFFFF)
+            {
+                SysTick_lp_ctx.estimated_core_freq = (uint32_t)core_freq;
+                SysTick_GetCoreFreqTickReloadValue(); /* Sets TickCountForOneTick */
+                TMR_DBG_LOG("core_freq=%d", SysTick_lp_ctx.estimated_core_freq);
+            }
+            else
+            {
+                TMR_DBG_LOG("invalid calibration state");
+            }
 
             SysTickSetCal(false);
         }
@@ -1680,7 +1663,6 @@ static uint32_t TMR_GetTotalSleepDuration32kTicks(uint32_t start_of_sleep)
     return (uint32_t)ticks;
 }
 
-
 void tickless_PostProcessing(tmrlp_tickless_systick_t * p_lp_ctx)
 {
     uint32_t sleep_duration_32k_ticks = 0;
@@ -1737,24 +1719,19 @@ void tickless_PostProcessing(tmrlp_tickless_systick_t * p_lp_ctx)
     }
 }
 
-
 /* suppose 32MHz crystal is running and FRO48M running */
 void tickless_StartFroCalibration(void)
 {
-    INPUTMUX_Init(INPUTMUX);
+    FRO48M_StartCalibration();
 
-    /* Setup to measure the selected target */
-    INPUTMUX_AttachSignal(INPUTMUX, 1U, kINPUTMUX_Xtal32MhzToFreqmeas);
-    INPUTMUX_AttachSignal(INPUTMUX, 0U, kINPUTMUX_MainClkToFreqmeas);
-
-    CLOCK_EnableClock(kCLOCK_Fmeas);
-
-    /* Start a measurement cycle and wait for it to complete. If the target
-       clock is not running, the measurement cycle will remain active
-       forever, so a timeout may be necessary if the target clock can stop */
-    FMEAS_StartMeasureWithScale(FMEAS_SYSCON, 17);
-
-    tmr_fro_cal_ctx.cal_ongoing = true;
+    if (froCalibrationState == gFro48MCalibration_c)
+    {
+        tmr_fro_cal_ctx.cal_ongoing = true;
+    }
+    else
+    {
+        tmr_fro_cal_ctx.cal_ongoing = false;
+    }
 }
 
 static uint32_t tickless_GetCoreFreqTickReloadValue(void)
@@ -1774,27 +1751,12 @@ static uint32_t tickless_GetCoreFreqTickReloadValue(void)
 
 static uint32_t tickless_CompleteFroCalibration(void)
 {
-    uint32_t        freqComp    = 0U;
-    uint32_t        refCount    = 0U;
-    uint32_t        targetCount = 0U;
-    uint32_t        freqRef     = CLOCK_GetFreq(kCLOCK_Xtal32M);
-
-    if (FMEAS_IsMeasureComplete(FMEAS_SYSCON))
-    {
-        /* Wait 2^17 counts of the reference clock : 4096us */
-        /* Get computed frequency */
-        FMEAS_GetCountWithScale(FMEAS_SYSCON, 17, &refCount, &targetCount);
-        freqComp = (uint32_t)(((((uint64_t)freqRef)*refCount)) / targetCount);
-
-        /* Disable the clocks */
-        CLOCK_DisableClock(kCLOCK_Fmeas);
-    }
-    return freqComp;
+    return FRO48M_CompleteCalibration(); 
 }
 
 void tickless_init(void)
 {
-    tmr_fro_cal_ctx.cal_ongoing                 = FALSE;
+    tmr_fro_cal_ctx.cal_ongoing                 = false;
 
     /* give a first frequency value - this may be refined by calibration */
     tmr_fro_cal_ctx.core_clock_freq             = CLOCK_GetFreq(kCLOCK_CoreSysClk);
@@ -1804,18 +1766,27 @@ void tickless_init(void)
 bool_t tickless_EstimateCoreClockFreq(void)
 {
     bool_t ret = FALSE;
+
     if (tmr_fro_cal_ctx.cal_ongoing)
     {
         uint32_t core_freq = tickless_CompleteFroCalibration();
+
         if (core_freq == 0)
         {
             ret = TRUE;
         }
         else
         {
-            tmr_fro_cal_ctx.core_clock_freq             = (uint32_t)core_freq;
-            tmr_fro_cal_ctx.TimerCountsForOneSysTick    = tickless_GetCoreFreqTickReloadValue(); /* Sets TickCountForOneTick */
-            SYSTICK_DBG_LOG("core_freq=%d", tmr_fro_cal_ctx.core_clock_freq);
+            if (core_freq == 0xFFFFFFFF)
+            {
+                SYSTICK_DBG_LOG("Invalid calibration state");
+            }
+            else
+            {
+                tmr_fro_cal_ctx.core_clock_freq             = (uint32_t)core_freq;
+                tmr_fro_cal_ctx.TimerCountsForOneSysTick    = tickless_GetCoreFreqTickReloadValue(); /* Sets TickCountForOneTick */
+                SYSTICK_DBG_LOG("core_freq=%d", tmr_fro_cal_ctx.core_clock_freq);
+            }
 
             tmr_fro_cal_ctx.cal_ongoing = false;
             ret = FALSE;
@@ -1878,7 +1849,7 @@ void tickless_SystickCheckDrift(void)
     } while(0);
 #endif
 }
-#endif
+#endif /* FSL_RTOS_FREE_RTOS */
 
 
 #ifndef DISABLE_TMR_ADAPTER
@@ -1899,17 +1870,18 @@ static TMR_clock_32k_hk_t mHk32k = {
     .freq32k_16thHz  = (32768 << FREQ32K_CAL_SHIFT), /* expressed in 16th of Hz: (1<<19) */
 };
 
-static void FRO32K_Update32kFrequency(uint32_t freq)
+static void FRO32K_Update32kFrequency(uint32_t *freq)
 {
-    if (freq != 0UL)
+    if ((freq != NULL) && (*freq != 0UL))
     {
         uint64_t u64_ts;
         TMR_clock_32k_hk_t *hk = (TMR_clock_32k_hk_t *)TMR_Get32kHandle();
 
         uint32_t val = hk->freq32k_16thHz;
-        val = ((val << FRO32K_CAL_AVERAGE) - val + freq) >> FRO32K_CAL_AVERAGE ;
+        val = ((val << FRO32K_CAL_AVERAGE) - val + *freq) >> FRO32K_CAL_AVERAGE ;
         hk->freq32k_16thHz = val;
         hk->freq32k = (val >> FREQ32K_CAL_SHIFT);
+        *freq = hk->freq32k;
 
         /* update SW timestamp with new frequency estimation */
         u64_ts = TMR_GetTimestampUs();
@@ -1946,17 +1918,11 @@ void FRO32K_Init(void)
 #if gClkRecalFro32K /* Will recalibrate 32k FRO on each warm start */
     // TODO MCB-539: parallelize FRO32K calibration to reduce the cold boot time
     uint32_t freq;
-    TMR_clock_32k_hk_t *hk = (TMR_clock_32k_hk_t *)TMR_Get32kHandle();
 
     FRO32K_StartCalibration();
     do {
        freq = FRO32K_CompleteCalibration();
     }  while (!freq);
-
-    hk->freq32k_16thHz = freq;
-    hk->freq32k = freq >> FREQ32K_CAL_SHIFT;
-    TMR_DBG_LOG("freq=%d", hk->freq32k);
-
 #else /* no gClkRecalFro32K */
     /* Does selected sleep mode require 32kHz oscillator?
         this is removed, Application shall take care of this now ...*/
@@ -1999,7 +1965,7 @@ void FRO32K_Init(void)
             {
                 freqComp = FRO32K_CompleteCalibration();
             } while (0 == freqComp);
-            /* freqComp is returned in 16th of Hz */
+
             /* Disable the clocks if disable previously */
             if ( !fmeas_clk_enable )
             {
@@ -2010,9 +1976,6 @@ void FRO32K_Init(void)
             {
                 SYSCON->MODEMCTRL &= ~SYSCON_MODEMCTRL_BLE_LP_OSC32K_EN(1);
             }
-
-            mHk32k.freq32k_16thHz = freqComp;
-            mHk32k.freq32k = freqComp >> FREQ32K_CAL_SHIFT;
         }
         else
         {
@@ -2027,22 +1990,26 @@ void FRO32K_Init(void)
 /* suppose 32MHz crystal is running and 32K running */
 void FRO32K_StartCalibration(void)
 {
-    INPUTMUX_Init(INPUTMUX);
+    if (froCalibrationState == gFroCalibrationInactive_c)
+    {
+        INPUTMUX_Init(INPUTMUX);
 
-    /* Setup to measure the selected target */
-    INPUTMUX_AttachSignal(INPUTMUX, 1U, kINPUTMUX_Xtal32MhzToFreqmeas);
-    INPUTMUX_AttachSignal(INPUTMUX, 0U, kINPUTMUX_32KhzOscToFreqmeas);
+        /* Setup to measure the selected target */
+        INPUTMUX_AttachSignal(INPUTMUX, 1U, kINPUTMUX_Xtal32MhzToFreqmeas);
+        INPUTMUX_AttachSignal(INPUTMUX, 0U, kINPUTMUX_32KhzOscToFreqmeas);
 
-    /* Temporary fix for RFT1366 : JN518x Frequency measure does not work 32kHz
-       if used for target clock */
-    SYSCON->MODEMCTRL |= SYSCON_MODEMCTRL_BLE_LP_OSC32K_EN(1);
+        /* Temporary fix for RFT1366 : JN518x Frequency measure does not work 32kHz
+           if used for target clock */
+        SYSCON->MODEMCTRL |= SYSCON_MODEMCTRL_BLE_LP_OSC32K_EN(1);
 
-    CLOCK_EnableClock(kCLOCK_Fmeas);
+        CLOCK_EnableClock(kCLOCK_Fmeas);
 
-    /* Start a measurement cycle and wait for it to complete. If the target
-       clock is not running, the measurement cycle will remain active
-       forever, so a timeout may be necessary if the target clock can stop */
-    FMEAS_StartMeasureWithScale(FMEAS_SYSCON, FRO32K_CAL_SCALE);
+        /* Start a measurement cycle and wait for it to complete. If the target
+           clock is not running, the measurement cycle will remain active
+           forever, so a timeout may be necessary if the target clock can stop */
+        FMEAS_StartMeasureWithScale(FMEAS_SYSCON, FRO32K_CAL_SCALE);
+        froCalibrationState = gFro32kCalibration_c;
+    }
 }
 
 // Return the result in unit of 1/(2^freq_scale)th of Hertz for higher accuracy
@@ -2053,7 +2020,12 @@ uint32_t FRO32K_CompleteCalibration(void)
     uint32_t        targetCount = 0U;
     uint32_t        freqRef     = CLOCK_GetFreq(kCLOCK_Xtal32M);
 
-    if (FMEAS_IsMeasureComplete(FMEAS_SYSCON))
+    if (froCalibrationState != gFro32kCalibration_c)
+    {
+        /* Set to invalid value */
+        freqComp = 0xFFFFFFFF;
+    }
+    else if (FMEAS_IsMeasureComplete(FMEAS_SYSCON))
     {
         /* Get computed frequency */
         FMEAS_GetCountWithScale(FMEAS_SYSCON, FRO32K_CAL_SCALE, &refCount, &targetCount);
@@ -2063,12 +2035,67 @@ uint32_t FRO32K_CompleteCalibration(void)
         CLOCK_DisableClock(kCLOCK_Fmeas);
 
         /* update frequency estimation with new measurement */
-        FRO32K_Update32kFrequency(freqComp);
+        FRO32K_Update32kFrequency(&freqComp);
+        froCalibrationState = gFroCalibrationInactive_c;
     }
 
     return freqComp;
 }
 
+/* suppose 32MHz crystal is running and FRO48M running */
+void FRO48M_StartCalibration(void)
+{
+    if (froCalibrationState == gFroCalibrationInactive_c)
+    {
+        INPUTMUX_Init(INPUTMUX);
+
+        /* Setup to measure the selected target */
+        INPUTMUX_AttachSignal(INPUTMUX, 1U, kINPUTMUX_Xtal32MhzToFreqmeas);
+        INPUTMUX_AttachSignal(INPUTMUX, 0U, kINPUTMUX_MainClkToFreqmeas);
+
+        CLOCK_EnableClock(kCLOCK_Fmeas);
+
+        /* Start a measurement cycle and wait for it to complete. If the target
+           clock is not running, the measurement cycle will remain active
+           forever, so a timeout may be necessary if the target clock can stop */
+        FMEAS_StartMeasureWithScale(FMEAS_SYSCON, 17);
+        froCalibrationState = gFro48MCalibration_c;
+    }
+}
+
+/*  Return the result in Hertz */
+uint32_t FRO48M_CompleteCalibration(void)
+{
+    uint32_t        freqComp    = 0U;
+    uint32_t        refCount    = 0U;
+    uint32_t        targetCount = 0U;
+    uint32_t        freqRef     = CLOCK_GetFreq(kCLOCK_Xtal32M);
+
+    if (froCalibrationState != gFro48MCalibration_c)
+    {
+        /* Set to invalid value */
+        freqComp = 0xFFFFFFFF;
+    }
+    else if (FMEAS_IsMeasureComplete(FMEAS_SYSCON))
+    {
+        /* Wait 2^17 counts of the reference clock : 4096us */
+        /* Get computed frequency */
+        FMEAS_GetCountWithScale(FMEAS_SYSCON, 17, &refCount, &targetCount);
+        freqComp = (uint32_t)(((((uint64_t)freqRef)*refCount)) / targetCount);
+
+        /* Disable the clocks */
+        CLOCK_DisableClock(kCLOCK_Fmeas);
+#ifndef FSL_RTOS_FREE_RTOS
+        /* For the baremetal use case, adjust the value of SysTick->LOAD after calibration.
+           RTOS and tickless implementations already cover this part. 
+           Denominator value needs to be adjusted according to application. */
+        SysTick->LOAD = freqComp / 1000;
+#endif
+        froCalibrationState = gFroCalibrationInactive_c;
+    }
+
+    return freqComp;
+}
 
 uint64_t TMR_Convert32kTicks2Us(uint64_t u64ticks)
 {
