@@ -362,6 +362,17 @@ ee_err_t EEPROM_DeInit(void)
 #else
         OSA_SemaphoreWait(mExtEepromSemaphoreId, osaWaitForever_c);
 #endif
+        /* If EEPROM_Deinit function is placed immediately after EEPROM_Init,
+         * looks like the Deep Power Down mode of MX25R8035F was not set correctly in those specific cycles.
+         * The workaround is to poll the Write Enable Latch bit to make sure the EEPROM is ready to
+         * be written. Although in MX25R8035F datasheet, it doesn't imply the necessity
+         * to set Write enable and check the WEL bit to put the device into DP
+         * mode - these operation are needed for flash Erase and Program operations.
+         * From SE team's test, this workaround does fix the issue. */
+        do {
+            SPIFI_SetCommand(SPIFI, &command[CMD_SPIFI_WRITE_ENABLE]);
+        } while (!(EEPROM_ReadStatusReq() & EEPROM_WEL_FLAG_MASK));
+
         SPIFI_SetCommand(SPIFI, &command[CMD_SPIFI_DP]);
         SPIFI_Deinit(SPIFI);
         SYSCON->AHBCLKCTRLSET[0] = SYSCON_AHBCLKCTRLSET0_SPIFI_CLK_SET_MASK;

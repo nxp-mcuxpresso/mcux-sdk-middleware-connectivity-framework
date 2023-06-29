@@ -10,6 +10,8 @@
 #ifndef __SECLIB_ECP256_H__
 #define __SECLIB_ECP256_H__
 
+#include <stddef.h>
+#include <stdbool.h>
 #include "SecLib.h"
 
 #ifndef EC_P256_DSPEXT
@@ -29,22 +31,30 @@
 
 /*! How many steps to use for the EC multiplication procedure */
 #ifndef gSecLibEcStepsAtATime
-#define gSecLibEcStepsAtATime   16U
+#define gSecLibEcStepsAtATime 16U
 #endif
 
-#define ECP256_COORDINATE_LEN    32u
-#define ECP256_COORDINATE_WLEN  (ECP256_COORDINATE_LEN/4u)
-#define ECP256_SCALAR_LEN 32u
-#define ECP256_SCALAR_WLEN (ECP256_SCALAR_LEN/4u)
-#define ECP256_POINT_LEN (2*ECP256_COORDINATE_LEN + 1)
+#define SEC_ECP256_COORDINATE_BITLEN 256u
+#define SEC_ECP256_COORDINATE_LEN    (SEC_ECP256_COORDINATE_BITLEN / 8u)
+#define SEC_ECP256_COORDINATE_WLEN   (SEC_ECP256_COORDINATE_LEN / 4u)
+#define SEC_ECP256_SCALAR_LEN        32u
+#define SEC_ECP256_SCALAR_WLEN       (SEC_ECP256_SCALAR_LEN / 4u)
+
+/* The point representation requires 1 additional header byte equal to 0x04u
+ * in the case of the uncompressed form */
+/* Compressed representation of a ppoint P(x,y) uses the following convention:
+ * 0x00: point at infinity
+ * 2u:  y is even, P is represented by x and y is computed knowing y parity.
+ * 3u: y is odd*/
+#define SEC_ECP256_POINT_LEN         (2 * SEC_ECP256_COORDINATE_LEN + 1) 
 
 /*! *********************************************************************************
 *************************************************************************************
-* Public prototypes
+* Public type definitions
 *************************************************************************************
 ********************************************************************************** */
 
-typedef enum ecdsaStatus_tag {
+typedef enum {
     gSecEcdsaSuccess_c,
     gSecEcdsaBadParameters_c,
     gSecEcdsaInvalidState_c,
@@ -58,10 +68,10 @@ typedef enum ecdsaStatus_tag {
     gSecEcdsaFailure_c
 } secEcdsaStatus_t;
 
-typedef enum ecdhStatus_tag {
+typedef enum {
     gSecEcdhSuccess_c,
     gSecEcdhBadParameters_c,
-    gEcdhOutOfMemory_c,
+    gSecEcdhOutOfMemory_c,
     gSecEcdhRngError_c,
     gSecEcdhInvalidState_c,
     gSecEcdhInvalidPublicKey_c
@@ -81,21 +91,21 @@ typedef enum ecp256Status_t {
 } secEcp256Status_t;
 
 typedef union big_int256_t {
-    uint8_t  raw_8bit[ECP256_SCALAR_LEN];
-    uint32_t raw_32bit[ECP256_SCALAR_WLEN];
+    uint8_t  raw_8bit[SEC_ECP256_SCALAR_LEN];
+    uint32_t raw_32bit[SEC_ECP256_SCALAR_WLEN];
 } big_int256_t;
 
-typedef  big_int256_t ecp256Coordinate_t;
+typedef big_int256_t ecp256Coordinate_t;
 
-typedef union ecp256Point_t {
-    uint8_t raw[2*ECP256_COORDINATE_LEN];
+typedef union {
+    uint8_t raw[2*SEC_ECP256_COORDINATE_LEN];
     PACKED_STRUCT {
-        uint8_t x[ECP256_COORDINATE_LEN];
-        uint8_t y[ECP256_COORDINATE_LEN];
+        uint8_t x[SEC_ECP256_COORDINATE_LEN];
+        uint8_t y[SEC_ECP256_COORDINATE_LEN];
     } components_8bit;
     PACKED_STRUCT {
-        uint32_t x[ECP256_COORDINATE_WLEN];
-        uint32_t y[ECP256_COORDINATE_WLEN];
+        uint32_t x[SEC_ECP256_COORDINATE_WLEN];
+        uint32_t y[SEC_ECP256_COORDINATE_WLEN];
     } components_32bit;
     PACKED_STRUCT {
         ecp256Coordinate_t X;
@@ -103,40 +113,57 @@ typedef union ecp256Point_t {
     } coord;
 } ecp256Point_t;
 
-typedef struct ecp256KeyPair_tag {
-    ecp256Point_t       public_key;
-    big_int256_t private_key;
+typedef struct
+{
+    ecp256Point_t public_key;
+    big_int256_t  private_key;
 } ecp256KeyPair_t;
 
-typedef big_int256_t  ecdhPrivateKey_t;
+typedef big_int256_t ecdhPrivateKey_t;
 
+typedef big_int256_t ec_p256_coordinate;
+
+typedef ecp256Point_t ecdhPublicKey_t;
 typedef ecp256Point_t ecdhDhKey_t;
 typedef ecp256Point_t ecdhPoint_t;
-typedef ecp256Point_t ecdhPublicKey_t;
 
-typedef struct computeDhKeyParams_tag{
-    ecdhPrivateKey_t privateKey;    /*!< Secret */
-    ecdhPublicKey_t peerPublicKey;  /*!< Peer public key */
-    ecdhPoint_t outPoint;           /*!< The resulting point */
-    void *pWorkBuffer;              /*!< Pointer to the buffer used for computation */
-    uint8_t procStep;               /*!< The step used for segmented computation */
-    uint32_t aUserData[1];          /*!< Hold upper layer private data */
+typedef void (*pfDhKeyCallback_t)(void *pParam);
+
+typedef struct computeDhKeyParams_tag
+{
+    ecdhPrivateKey_t  privateKey;       /*!< Secret */
+    ecdhPublicKey_t   peerPublicKey;    /*!< Peer public key */
+    ecdhPoint_t       outPoint;         /*!< The resulting point */
+    void *            pWorkBuffer;      /*!< Pointer to the buffer used for computation */
+    uint8_t           procStep;         /*!< The step used for segmented computation */
+    uint8_t           result;           /*!< The asynchronous computation result */
+    pfDhKeyCallback_t pFCallback;       /*!< The function to be called when asynchronous computation completes */
+    void              *pMsg;            /*!< Pointer to a pre-allocated message to be injected in the SM state machine when asynchronous
+                                           computation completes */
+    bool_t             keepInternalBlob; /*!< Keep internal object foir later usage? */
+    uint32_t           aUserData[1];     /*!< Hold upper layer private data */
 } computeDhKeyParam_t;
 
-typedef void(*secLibCallback_t)(computeDhKeyParam_t* pData);
+typedef void (*secLibCallback_t)(computeDhKeyParam_t *pData);
 
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/************************************************************************************
+*************************************************************************************
+* Public functions
+*************************************************************************************
+************************************************************************************/
+
 /*! *********************************************************************************
-* \brief  This function performs initialization of the callback used to offload
-* elliptic curve multiplication.
-*
-* \param[in]  pfCallback Pointer to the function used to handle multiplication.
-*
-********************************************************************************** */
+ * \brief  This function performs initialization of the callback used to offload
+ * elliptic curve multiplication.
+ *
+ * \param[in]  pfCallback Pointer to the function used to handle multiplication.
+ *
+ ********************************************************************************** */
 void SecLib_SetExternalMultiplicationCb(secLibCallback_t pfCallback);
 
 /*! *********************************************************************************
@@ -294,8 +321,8 @@ secEcdhStatus_t Ecdh_ComputeSharedSecret
  * NOTE: The ECDSA signature generation function expects a valid private key, no private key validation is performed.
  *       An ephemeral key is generated internally
  *
- *  @param [out] pSignature      Pointer to a 64 byte buffer to where the generated signature (r,s) will be stored.
- *                              The signature is stored as the concatenation r||s with the integers r and s being in BE format.
+ *  @param [out] pSignature Pointer to a 64 byte buffer to where the generated signature (r,s) will be stored.
+ *                          The signature is stored as the concatenation r||s with the integers r and s being in BE format.
  *
  * @param [in]  pDigest         Pointer to a buffer of byte length digestLen containing the message digest in BE format.
  * @param [in]  DigestLen       Byte length of the passed message digest.
@@ -305,38 +332,33 @@ secEcdhStatus_t Ecdh_ComputeSharedSecret
  * @retval gSecEcdsaInvalidEphemeralKey_c   The passed ephemeral key is out of range.
  * @retval gSecEcdsaFailure_c                The signature generation failed and shall be repeated with a fresh ephemeral key.
  */
-secEcdsaStatus_t ECDSA_SignFromHash(
-    uint8_t             *pSignature,
-    const uint8_t       *pDigest,
-    uint16_t            DigestLen,
-    const uint8_t       *pPrivKey
-);
+secEcdsaStatus_t ECDSA_SignFromHash(uint8_t *      pSignature,
+                                    const uint8_t *pDigest,
+                                    uint16_t       DigestLen,
+                                    const uint8_t *pPrivKey);
 
 /**
  * @brief ECDSA message signature generation
  *
  * For a given message computes the SHA256 digest and then computes signature calling ECDSA_SignFromHash.
  *
- * @param [out] pSignature     Pointer to a 64 byte buffer to where the generated signature (r,s) will be stored.
- *                              The signature is stored as the concatenation r||s with the integers r and s being in BE format.
+ * @param [out] pSignature Pointer to a 64 byte buffer to where the generated signature (r,s) will be stored.
+ *                         The signature is stored concatenating r||s with the integers r and s being in BE format.
  *
  * @param [in]  msg         Pointer to a constant message buffer
  * @param [in]  msglen      number of bytes in message.
  * @param [in]  pPrivKey     Pointer to a 32 byte buffer containing the private key d in range [1,n-1] in BE format.
 
- * @retval gSecEcdsaSuccess_c               The operation finished successfully.
- * @retval gSecEcdsaInvalidEphemeralKey_c   The passed ephemeral key is out of range.
- * @retval gSecEcdsaFailure_c                The signature generation failed and shall be repeated with a fresh ephemeral key.
+ * @retval gSecEcdsaSuccess_c             The operation finished successfully.
+ * @retval gSecEcdsaInvalidEphemeralKey_c The passed ephemeral key is out of range.
+ * @retval gSecEcdsaFailure_c    The signature generation failed and shall be repeated with a fresh ephemeral key.
  * @retval gSecEcdsaBadParameter_c           if msg is NULL or msglen is 0.
  *
  */
-secEcdsaStatus_t ECDSA_SignMessage
-(
-    uint8_t       pSignature[ECP256_COORDINATE_LEN*2],
-    const uint8_t *msg,
-    const size_t  msglen,
-    const uint8_t pPrivKey[ECP256_SCALAR_LEN]
-);
+secEcdsaStatus_t ECDSA_SignMessage(uint8_t        pSignature[SEC_ECP256_COORDINATE_LEN * 2],
+                                   const uint8_t *msg,
+                                   const size_t   msglen,
+                                   const uint8_t  pPrivKey[SEC_ECP256_SCALAR_LEN]);
 
 
 
@@ -347,27 +369,25 @@ secEcdsaStatus_t ECDSA_SignMessage
  *
  *    (u1*G + u2*Q).x mod n = r
  *
- * where u1 = e'*s^(-1) mod n and u2 = r*s^(-1) mod n. Here, Q is a valid public key and e' is derived from e by either truncating
- * it or padding it with zeros to 32 bytes.
+ * where u1 = e'*s^(-1) mod n and u2 = r*s^(-1) mod n. Here, Q is a valid public key and e' is derived from e by either
+ * truncating it or padding it with zeros to 32 bytes.
  *
- * @param [in] pPubKey          Pointer to a 64 byte buffer containing the public key (x,y).
- *                              The public key is stored as the concatenation x||y with x and y being in BE format.
- * @param [in] pDigest          Pointer to a buffer of byte length digestLen containing the message digest in BE format.
- * @param [in] DigestLen        Byte length of the passed message digest.
- * @param [in] pSignature       Pointer to a 64 byte buffer containing the generated signature (r,s).
- *                              The signature is stored as the concatenation r||s with the integers r and s being in BE format.
+ * @param [in] pPubKey    Pointer to a 64 byte buffer containing the public key (x,y).
+ *                        The public key is stored as the concatenation x||y with x and y being in BE format.
+ * @param [in] pDigest    Pointer to a buffer of byte length digestLen containing the message digest in BE format.
+ * @param [in] DigestLen  Byte length of the passed message digest.
+ * @param [in] pSignature Pointer to a 64 byte buffer containing the generated signature (r,s).
+ *                        The signature is stored as the concatenation r||s with the integers r and s being in BE format.
  *
  * @retval gSecEcdsaSuccess_c            The operation finished successfully.
  * @retval gSecEcdsaInvalidSignature_c   The passed signature is invalid.
  * @retval gSecEcdsaInvalidPoint_c       The passed public key is invalid.
  *
  */
-secEcdsaStatus_t ECDSA_VerifySignature(
-    const uint8_t     *pPubKey,
-    const uint8_t     *pDigest,
-    uint16_t          DigestLen,
-    const uint8_t     *pSignature
-);
+secEcdsaStatus_t ECDSA_VerifySignature(const uint8_t *pPubKey,
+                                       const uint8_t *pDigest,
+                                       uint16_t       DigestLen,
+                                       const uint8_t *pSignature);
 
 
 /**
@@ -376,25 +396,22 @@ secEcdsaStatus_t ECDSA_VerifySignature(
  * This function computes the SHA256 digest over the message and then verifies an ECDSA signature
  * calling ECDSA_VerifySignature
  *
- * @param [in] pSignature       Pointer to a 64 byte buffer containing the public key (x,y).
- *                              The public key is stored as the concatenation x||y with x and y being in BE format.
- * @param [in] msg              Pointer to a message buffer.
- * @param [in] msglen           Byte length of the passed message.
- * @param [in] pPublicKey       Pointer to a 64 byte buffer containing the generated signature (r,s).
- *                              The signature is stored as the concatenation r||s with the integers r and s being in BE format.
+ * @param [in] pSignature  Pointer to a 64 byte buffer containing the public key (x,y).
+ *                         The public key is stored as the concatenation x||y with x and y being in BE format.
+ * @param [in] msg         Pointer to a message buffer.
+ * @param [in] msglen      Byte length of the passed message.
+ * @param [in] pPublicKey  Pointer to a 64 byte buffer containing the generated signature (r,s).
+ *                         The signature is stored concatenating r||s with the integers r and s being in BE format.
  *
  * @retval gSecEcdsaSuccess_c            The operation finished successfully.
  * @retval gSecEcdsaInvalidSignature_c   The passed signature is invalid.
  * @retval gSecEcdsaInvalidPoint_c       The passed public key is invalid.
  *
  */
-secEcdsaStatus_t ECDSA_VerifyMessageSignature
-(
-    const uint8_t pSignature[ECP256_COORDINATE_LEN*2],
-    const uint8_t *msg,
-    const size_t  msglen,
-    const uint8_t pPublicKey[ECP256_COORDINATE_LEN*2]
-);
+secEcdsaStatus_t ECDSA_VerifyMessageSignature(const uint8_t  pSignature[SEC_ECP256_COORDINATE_LEN * 2],
+                                              const uint8_t *msg,
+                                              const size_t   msglen,
+                                              const uint8_t  pPublicKey[SEC_ECP256_COORDINATE_LEN * 2]);
 
 
 /****************************************************************************
@@ -417,80 +434,105 @@ secEcdsaStatus_t ECDSA_VerifyMessageSignature
  * \remarks
  *
  ********************************************************************************** */
-secEcp256Status_t ECP256_GenerateNewKeys
-(
-    ecp256Point_t   *pOutPublicKey,
-    big_int256_t    *pOutPrivateKey,
-    void            *pMultiplicationBuffer
-);
-
-
-void ecp_coordinate_copy
-(
-    uint8_t           dest_coordinate[ECP256_COORDINATE_LEN],
-    const uint8_t     src_coordinate[ECP256_COORDINATE_LEN]
-);
-
-void ecp_coordinate_copy_and_change_endianess(
-    uint8_t         dest_coordinate[ECP256_COORDINATE_LEN],
-    const uint8_t   coordinate[ECP256_COORDINATE_LEN]
-);
-
-void ecp_p256_copy
-(
-    uint8_t        dest_XY[2*ECP256_COORDINATE_LEN],
-    const uint8_t  *src
-);
-
-void ecp_p256_copy_and_change_endianess
-(
-    uint8_t        dest_XY[2*ECP256_COORDINATE_LEN],
-    const uint8_t *src
-);
-
-void ecp_coordinate_change_endianess
-(
-    uint8_t   coordinate[ECP256_COORDINATE_LEN]
-);
+secEcp256Status_t ECP256_GenerateNewKeys(ecp256Point_t   *pOutPublicKey,
+                                         big_int256_t    *pOutPrivateKey,
+                                         void            *pMultiplicationBuffer);
 
 
 /*! *********************************************************************************
- * \brief Generate a random 32 byte long scalar using RNG, without ensuring it belongs
- *        to [1..p-1] valid range.
+ * \brief Duplicate ECP256 affine coordinate without endianess modification
  *
- * \param[out] pOutPrivateKey pointer on 32 byte storage to receive private key
- *
- * \return
- *
- * \pre       RNG initialization must have been run
- *
- * \remarks   In the unlikely case where the procedure generating the public key rejects
- *            the private key as invalid, it is assumed that we reattempt until a valid
- *            key if generated. After 5 errors it bails out.
+ * \param[out] dest pointer on 32 byte storage in RAM location, preferably aligned
+ * \param[in]  src pointer on point coordinate, eith X or Y, can be unaligned or read-only
  *
  ********************************************************************************** */
-secEcp256Status_t ECP256_GeneratePrivateKey
-(
-    uint8_t   pOutPrivateKey[ECP256_COORDINATE_LEN]
-);
+void ecp_coordinate_copy(uint8_t       dest[SEC_ECP256_COORDINATE_LEN],
+                         const uint8_t src[SEC_ECP256_COORDINATE_LEN]);
+
+/*! *********************************************************************************
+ * \brief Duplicate ECP256 affine coordinate swapping its endianess
+ *
+ * \param[out] dest pointer on 32 byte storage in RAM location, preferably aligned
+ * \param[in]  src pointer on point coordinate, either X or Y 
+ *             must start with in[0] == 0x04
+ *
+ *  \remark   see ecp_coordinate_copy
+ * 
+ ********************************************************************************** */
+void ecp_coordinate_copy_and_change_endianess(uint8_t       dest_coordinate[SEC_ECP256_COORDINATE_LEN],
+                                              const uint8_t coordinate[SEC_ECP256_COORDINATE_LEN]);
+
+/*! *********************************************************************************
+ * \brief Inplace endianess change of a P256 coordinate 
+ *
+ * \param[in/out]  src pointer on point coordinate, either X or Y 
+ *             must sbe in RAM
+ *
+ *  \remark   see ecp_coordinate_copy
+ * 
+ ********************************************************************************** */
+void ecp_coordinate_change_endianess(uint8_t coordinate[SEC_ECP256_COORDINATE_LEN]);
+
+/*! *********************************************************************************
+ * \brief Duplicate ECP256 affine point  keeping its endianess
+ *
+ * \param[out] dest_XY pointer on 64 byte storage in RAM location, preferably aligned
+ * \param[in]  src pointer on point (might be unaligned and or in read-only)
+ *
+ *  \remark  ecp_coordinate_copy applied to both coordinates
+ * 
+ ********************************************************************************** */
+void ecp_p256_copy(uint8_t        dest_XY[SEC_ECP256_POINT_LEN-1],
+                   const uint8_t  *src);
+
+/*! *********************************************************************************
+ * \brief Duplicate ECP256 affine point  swapping its endianess
+ *
+ * \param[out] dest_XY pointer on 64 byte storage in RAM location, preferably aligned
+ * \param[in]  src pointer on point (might be unaligned and or in read-only)
+ *
+ *  \remark  ecp_coordinate_copy_and_change_endianess applied to both coordinates
+ * 
+ ********************************************************************************** */
+void ecp_p256_copy_and_change_endianess(uint8_t       dest_XY[SEC_ECP256_POINT_LEN-1],
+                                        const uint8_t *src);
+
+
+/*! *********************************************************************************
+ * \brief Concatenate ECP256 key pair to an octet string affine point first followed by 
+ *        private key scalar
+ *
+ * \param[out] serialized_key pointer on 64 + 32 byte storage in RAM location, preferably aligned
+ * \param[in]  keypair pointer on keypair structure (might be read-only)
+ *
+ * 
+ ********************************************************************************** */
+void ECP256_KeyPairSerialize(uint8_t serialized_key[SEC_ECP256_POINT_LEN+SEC_ECP256_SCALAR_LEN],
+                             ecp256KeyPair_t *keypair);
+
+/*! *********************************************************************************
+ * \brief Scatter content of serialized key to keypair structure
+ *
+ * \param[out]  keypair pointer on keypair structure
+ * \param[in] serialized_key pointer on 64 + 32 byte octet string  (might be read-only)
+ *
+ * 
+ ********************************************************************************** */
+void ECP256_KeyPairDeserialize(ecp256KeyPair_t *keypair,
+                               uint8_t serialized_key[SEC_ECP256_POINT_LEN+SEC_ECP256_SCALAR_LEN]);
 
 /*! *********************************************************************************
  * \brief Load point structure from octet string
  *
  * \param[out] R pointer on 64 byte storage (ecp256Point_t size)
- * \param[in]  in pointer on point array (65 byte) containing affine coordinates in uncompressed format
- *             must start with in[0] == 0x04
+ * \param[in]  in pointer on point array (65 byte) containing affine coordinates in
+ *             uncompressed format must start with in[0] == 0x04
  * \param[in]  change_endianness byte reverse coordinates if true
  *
  * \return
  *
  ********************************************************************************** */
-void ECP256_PointLoad
-(
-    ecp256Point_t *R,
-    const uint8_t *in,
-    bool change_endianness
-);
+void ECP256_PointLoad(ecp256Point_t *R, const uint8_t *in, bool change_endianness);
 
 /*! *********************************************************************************
  * \brief Store point structure from octet string to uncompressed format
@@ -502,51 +544,10 @@ void ECP256_PointLoad
  * \return
  *
  ********************************************************************************** */
-void ECP256_PointWrite
-(
-    uint8_t *out,
-    const ecp256Point_t *P,
-    bool change_endianness
-);
-/*! *********************************************************************************
- * \brief Perform modular reduction on number
- *
- * \param[out]  result   pointer on 8 word array containing reduced value. R = bn mod N
- * \param[in]   bn       pointer on big number to reduce
- * \param[in]   bn_in_len size of bn in number of bytes bn is assumed to be less than 64
- *
- * \return  gSecEcp256Success_c if success
- *          gSecEcp256BadParameters_c if bn is larger than 512 bits (64 bytes)
- *
- ********************************************************************************** */
-secEcp256Status_t ECP256_ModularReductionN
-(
-    uint32_t       R[ECP256_COORDINATE_WLEN],
-    const uint8_t * bn_in,
-    uint8_t         bn_in_len
-);
-
-
+void ECP256_PointWrite(uint8_t *out, const ecp256Point_t *P, bool change_endianness);
 
 /*! *********************************************************************************
- * \brief Multiply 2 scalars and perform the the modulo reduction.
- *        R = ( fe1 * fe2 ) mod N
- *
- * \param[out] R        pointer on result - 256 bit array BE
- * \param[in]  fe1      pointer on scalar field element 256 bits (BE)
- * \param[in]  fe2      pointer on scalar field element 256 bits (BE)
- * \return gSecEcp256Success_c if success
- *
- ********************************************************************************** */
-secEcp256Status_t ECP256_ScalarMultiplicationModN
-(
-    uint32_t       R[ECP256_COORDINATE_WLEN],
-    const uint32_t fe1[ECP256_COORDINATE_WLEN],
-    const uint32_t fe2[ECP256_COORDINATE_WLEN]
-);
 
-
-/*! *********************************************************************************
  * \brief Load coordinate forcing it to belong to field
  *
  * \param[out] out_fe   pointer on resulting scalar field element (BE)
@@ -555,7 +556,8 @@ secEcp256Status_t ECP256_ScalarMultiplicationModN
  * \return
  *
  ********************************************************************************** */
-void ECP256_CoordinateLoad(uint32_t *out_fe, const uint8_t * in);
+void ECP256_CoordinateLoad(uint32_t      *out_fe,
+                           const uint8_t *in);
 
 /*! *********************************************************************************
  * \brief Load  scalar and forcing it to belong to field
@@ -569,12 +571,9 @@ void ECP256_CoordinateLoad(uint32_t *out_fe, const uint8_t * in);
  *         gSecEcp256BadParameters_c if fe_in_len exceeds 512 bit capacity
  *
  ********************************************************************************** */
-secEcp256Status_t ECP256_FieldLoad
-(
-    uint32_t      R[ECP256_SCALAR_WLEN],
-    const uint8_t *fe_in,
-    uint8_t       fe_in_len
-);
+secEcp256Status_t ECP256_FieldLoad(uint32_t      R[SEC_ECP256_SCALAR_WLEN],
+                                   const uint8_t *fe_in,
+                                   uint8_t       fe_in_len);
 
 /*! *********************************************************************************
  * \brief Write scalar / Field element to storage
@@ -587,11 +586,40 @@ secEcp256Status_t ECP256_FieldLoad
  *         gSecEcp256BadParameters_c if either pointer is NULL
  *
  ********************************************************************************** */
-secEcp256Status_t ECP256_FieldWrite
-(
-    uint8_t *fe_out,
-    uint8_t *fe_in
-);
+secEcp256Status_t ECP256_FieldWrite(uint8_t *fe_out,
+                                    uint8_t *fe_in);
+
+
+/*! *********************************************************************************
+ * \brief Perform modular reduction on number
+ *
+ * \param[out]  result   pointer on 8 word array containing reduced value. R = bn mod N
+ * \param[in]   bn       pointer on big number to reduce
+ * \param[in]   bn_in_len size of bn in number of bytes bn is assumed to be less than 64
+ *
+ * \return  gSecEcp256Success_c if success
+ *          gSecEcp256BadParameters_c if bn is larger than 512 bits (64 bytes)
+ *
+ ********************************************************************************** */
+secEcp256Status_t ECP256_ModularReductionN(uint32_t       R[SEC_ECP256_COORDINATE_WLEN],
+                                           const uint8_t *bn_in,
+                                           uint8_t        bn_in_len);
+
+/*! *********************************************************************************
+ * \brief Multiply 2 scalars and perform the the modulo reduction.
+ *        R = ( fe1 * fe2 ) mod N
+ *
+ * \param[out] R        pointer on result - 256 bit array BE
+ * \param[in]  fe1      pointer on scalar field element 256 bits (BE)
+ * \param[in]  fe2      pointer on scalar field element 256 bits (BE)
+ * \return gSecEcp256Success_c if success
+ *
+ ********************************************************************************** */
+secEcp256Status_t ECP256_ScalarMultiplicationModN(uint32_t       R[SEC_ECP256_SCALAR_WLEN],
+                                                  const uint32_t fe1[SEC_ECP256_SCALAR_WLEN],
+                                                  const uint32_t fe2[SEC_ECP256_SCALAR_WLEN]);
+
+
 
 /*! *********************************************************************************
  * \brief Load coordinate forcing it to belong to field
@@ -604,44 +632,62 @@ secEcp256Status_t ECP256_FieldWrite
  * \return
  *
  ********************************************************************************** */
- secEcp256Status_t ECP256_DoublePointMulAdd
- (
-     void        *ec_R,
-     const void  *ec_P1,
-     const void  *ec_fe1,
-     const void  *ec_P2,
-     const void  *ec_fe2
- );
+ secEcp256Status_t ECP256_DoublePointMulAdd(void *ec_R,
+                                                     const void  *ec_P1,
+                                            const void  *ec_fe1,
+                                            const void  *ec_P2,
+                                            const void  *ec_fe2);
 
 
 
 /*! *********************************************************************************
- * \brief Return inverted point
+ * \brief Return inverted point (x,y)->(x, y-p)
  *
- * \param[out] R   result vector
- * \param[in]  P1  pointer on ECP256R1 point input octet string
+ * \param[out] R result vector
+ * \param[in]  P pointer on ECP256R1 point input octet string
  *
  * \return
  *
  ********************************************************************************** */
-secEcp256Status_t ECP256_PointInvert
-(
-    uint32_t       *R,
-    uint32_t const *P
-);
+secEcp256Status_t ECP256_PointInvert(uint32_t *R, uint32_t const *P);
 
 /*! *********************************************************************************
  * \brief Return whether point is valid or not
  *
- * \param[in]  P   pointer on ECP256R1 point input octet string
+ * \param[in]  P pointer on ECP256R1 point input octet string
  *
  * \return  true if ECP256R1 point is valid false otherwise
  *
  ********************************************************************************** */
-bool ECP256_PointValid
-(
-    const ecp256Point_t *P
-);
+bool ECP256_PointValid(const ecp256Point_t *P);
+
+/*! *********************************************************************************
+ * \brief Return whether point is valid or not, i.e it belongs to the curve
+ *        The DSP_EXT library requires that the input point be coded in BigEndian.
+ *        The BLE protocol stack passes point in LE.
+ *
+ * \param[in]  P   pointer on ECP256R1 point input octet string LE format
+ *
+ * \return  true if ECP256R1 point is valid false otherwise
+ *
+ ********************************************************************************** */
+#if (defined EC_P256_DSPEXT && (EC_P256_DSPEXT == 1))
+static inline bool ECP256_LePointValid(const ecp256Point_t *P)
+{
+    ecp256Point_t tmp;
+    ecp_p256_copy_and_change_endianess(tmp.raw, P->raw);
+    return ECP256_PointValid(&tmp);
+}
+#else
+
+extern bool_t EcP256_IsPointOnCurve(const uint32_t *X, const uint32_t *Y);
+
+static inline bool ECP256_LePointValid(const ecp256Point_t *P)
+{
+    return EcP256_IsPointOnCurve((const uint32_t *)&P->components_32bit.x[0],
+                                 (const uint32_t *)&P->components_32bit.y[0]);
+}
+#endif
 
 
 /*! *********************************************************************************
@@ -654,15 +700,30 @@ bool ECP256_PointValid
  * \return  gSecEcp256Success_c if success
  *
  ********************************************************************************** */
-secEcp256Status_t ECP256_PointMult
-(
-    ecp256Point_t * R,
-    const uint8_t * P,
-    const uint8_t * fe
-);
+secEcp256Status_t ECP256_PointMult(ecp256Point_t *R,
+                                   const uint8_t *P,
+                                   const uint8_t *fe);
 
 
-void ECP256_PointDisplay(const char * str, const uint8_t *point);
+void ECP256_PointDisplay(const char *str, const uint8_t *point);
+
+
+/*! *********************************************************************************
+ * \brief Generate a random 32 byte long scalar using RNG, without ensuring it belongs
+ *        to [1..p-1] valid range.
+ *
+ * \param[out] pOutPrivateKey pointer on big int256 (32 byte) storage to receive private key
+ *
+ * \return
+ *
+ * \pre       RNG initialization must have been run
+ *
+ * \remarks   In the unlikely case where the procedure generating the public key rejects
+ *            the private key as invalid, it is assumed that we reattempt until a valid
+ *            key if generated. After 5 errors it bails out.
+ *
+ ********************************************************************************** */
+secEcp256Status_t ECP256_GeneratePrivateKey(big_int256_t *pOutPrivateKey);
 
 /*! *********************************************************************************
  * \brief ECP256R1 key pair: generate random number private
@@ -672,14 +733,15 @@ void ECP256_PointDisplay(const char * str, const uint8_t *point);
  *              64 byte Storage provided by caller.
  * \param[out] pOutPrivateKey   pointer on ECP256R1 private key.
  *              32 byte storage provided by caller.
+ * \param[in] pMultiplicationBuffer   pointer on work buffer for mutiplication.
+ *            Not used in the case of NXP Ultrafast EC P256 library.
  * \return  gSecEcp256Success_c if success
  *
  ********************************************************************************** */
-secEcp256Status_t ECP256_GenerateKeyPair
-(
-    ecp256Point_t        *pOutPublicKey,
-    ecp256Coordinate_t   *pOutPrivateKey
-);
+secEcp256Status_t ECP256_GenerateKeyPair(ecp256Point_t  *pOutPublicKey,
+                                         big_int256_t   *pOutPrivateKey,
+                                         void           *pMultiplicationBuffer);
+
 
 /*! *********************************************************************************
  * \brief ECP256R1 generate public from private key passed as argument
@@ -692,11 +754,9 @@ secEcp256Status_t ECP256_GenerateKeyPair
  * Note:    Does not retry if private key is not suitable
  *
  ********************************************************************************** */
-secEcp256Status_t ECP256_GeneratePublicKey
-(
-    uint8_t * pOutPublicKey,
-    const uint8_t * pInPrivateKey
-);
+secEcp256Status_t ECP256_GeneratePublicKey(uint8_t       *pOutPublicKey,
+                                           const uint8_t *pInPrivateKey,
+                                           void          *pMultiplicationBuffer);
 
 /*! *********************************************************************************
  * \brief ECP256R1 generate private key using RNG
@@ -707,10 +767,7 @@ secEcp256Status_t ECP256_GeneratePublicKey
  * Note:    Does not retry if private key is not suitable
  *
  ********************************************************************************** */
-secEcp256Status_t ECP256_GeneratePrivateKey
-(
-    uint8_t   pOutPrivateKey[ECP256_COORDINATE_LEN]
-);
+secEcp256Status_t ECP256_GeneratePrivateKey(big_int256_t *pOutPrivateKey);
 
 /*! *********************************************************************************
  * \brief Retrieve ECP256R1 G point in BE format
@@ -721,17 +778,8 @@ secEcp256Status_t ECP256_GeneratePrivateKey
  ********************************************************************************** */
 void ECP256_GetGPoint(ecp256Point_t *GPoint);
 
-void ECP256_KeyPairSerialize
-(
-    uint8_t serialized_key[ECP256_POINT_LEN+ECP256_SCALAR_LEN],
-    ecp256KeyPair_t *keypair
-);
 
-void ECP256_KeyPairDeserialize
-(
-    ecp256KeyPair_t *keypair,
-    uint8_t serialized_key[ECP256_POINT_LEN+ECP256_SCALAR_LEN]
-);
+
 #if !(defined EC_P256_DSPEXT && (EC_P256_DSPEXT == 1))
 
 void Ecdh_JacobiCompleteMult(computeDhKeyParam_t *pData);

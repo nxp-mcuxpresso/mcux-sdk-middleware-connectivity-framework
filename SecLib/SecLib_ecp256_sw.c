@@ -213,7 +213,7 @@ secResultType_t ECDH_P256_GenerateKeys
     }
 #else
     ecp256KeyPair_t       KeyPair;
-    if (gSecEcp256Success_c != ECP256_GenerateKeyPair(&KeyPair.public_key, &KeyPair.private_key))
+    if (gSecEcp256Success_c != ECP256_GenerateKeyPair(&KeyPair.public_key, &KeyPair.private_key, NULL))
     {
         result = gSecError_c;
     }
@@ -477,62 +477,4 @@ secResultType_t ECDH_P256_ComputeDhKeySeg
     return result;
 }
 
-secEcdsaStatus_t ECDSA_SignMessage
-(
-    uint8_t       signature[ECP256_COORDINATE_LEN*2],
-    const uint8_t *msg,
-    const size_t  msglen,
-    const uint8_t private_key[ECP256_SCALAR_LEN]
-)
-{
-    secEcdsaStatus_t st;
-    do {
-        uint8_t MessageDigest[SHA256_HASH_SIZE] = { 0 };
 
-        if (msg == NULL || msglen == 0)
-        {
-            st = gSecEcdsaBadParameters_c;
-            break;
-        }
-        SHA256_Hash(msg, msglen, MessageDigest);
-        st = ECDSA_SignFromHash(signature, MessageDigest, SHA256_HASH_SIZE, private_key);
-    } while (false);
-    return st;
-}
-
-secEcdsaStatus_t ECDSA_VerifyMessageSignature
-(
-    const uint8_t signature[ECP256_COORDINATE_LEN*2],
-    const uint8_t *msg,
-    const size_t  msglen,
-    const uint8_t public_key[ECP256_COORDINATE_LEN*2]
-)
-{
-    secEcdsaStatus_t st;
-    do {
-        uint8_t MessageDigest[SHA256_HASH_SIZE] = { 0 };
-
-        if (msg == NULL || msglen == 0)
-        {
-            st = gSecEcdsaBadParameters_c;
-            break;
-        }
-        SHA256_Hash(msg, msglen, MessageDigest);
-        st = ECDSA_VerifySignature(public_key, MessageDigest, SHA256_HASH_SIZE, signature);
-
-    } while (false);
-    return st;
-}
-
-
-void ECP256_KeyPairSerialize( uint8_t serialized_key[ECP256_POINT_LEN+ECP256_SCALAR_LEN], ecp256KeyPair_t *keypair)
-{
-    ECP256_PointWrite(serialized_key, &keypair->public_key, false);
-    FLib_MemCpy(&serialized_key[ECP256_POINT_LEN], &keypair->private_key.raw_8bit[0], ECP256_SCALAR_LEN);
-}
-
-void ECP256_KeyPairDeserialize(ecp256KeyPair_t *keypair, uint8_t serialized_key[ECP256_POINT_LEN+ECP256_SCALAR_LEN])
-{
-    ECP256_PointLoad(&keypair->public_key, serialized_key, false);
-    FLib_MemCpy(&keypair->private_key.raw_8bit[0], &serialized_key[ECP256_POINT_LEN], ECP256_SCALAR_LEN);
-}

@@ -18,6 +18,7 @@
 #endif
 
 #include "Eeprom.h"
+#include "OtaUtils.h"
 /************************************************************************************
 *************************************************************************************
 * Public macros
@@ -332,6 +333,59 @@ void OTA_CancelImage(void);
 *
 ********************************************************************************** */
 void OTA_ResetCurrentEepromAddress(void);
+
+/*! *********************************************************************************
+* \brief  Returns the Current Eeprom Address
+*
+********************************************************************************** */
+uint32_t OTA_GetCurrentEepromAddressOffset(void);
+
+#if defined(gOTAAllowCustomStartAddress) && (gOTAAllowCustomStartAddress == 1)
+/*! *********************************************************************************
+* \brief  Set the Additional Eeprom Offset
+* \param[in] address_offset      address to set the Start Eeprom Address
+*
+* \return Aligned offset applied (Aligned of sectors size)
+*
+********************************************************************************** */
+uint32_t OTA_SetStartEepromOffset(uint32_t address_offset);
+#endif
+
+#if defined (gOTAUseCustomOtaEntry) && (gOTAUseCustomOtaEntry == 1)
+/*! *********************************************************************************
+* \brief  Add custom OTA data to be shared with SSBL
+*
+* \param[in] pCustomData      pointer to a byte array containing the custom data
+* \param[in] customDataSize   size in bytes of the custom data
+*
+************************************************************************************ */
+otaResult_t OTA_AddCustomOTAData(uint8_t *pCustomData, uint16_t customDataSize);
+
+/*! *********************************************************************************
+* \brief  Store the custom OTA entry structure into correct location,
+* set the PSECT OTA entry field and reset the device
+*
+************************************************************************************ */
+bool OTA_CommitCustomEntries(void);
+
+/*! *********************************************************************************
+* \brief  Get the custom OTA entry structure
+*
+************************************************************************************ */
+otaResult_t OTA_GetCustomEntries(CustomOtaEntries_t *pEntries);
+
+/*! *********************************************************************************
+* \brief  Clear the custom OTA entry structure
+*
+************************************************************************************ */
+void OTA_ResetCustomEntries(void);
+
+/*! *********************************************************************************
+* \brief  After reception of OTA image add new image flag
+*
+************************************************************************************ */
+void OTA_AddNewImageFlag(void);
+#endif
 
 /*! *********************************************************************************
 * \brief  After reception of OTA image set image flag

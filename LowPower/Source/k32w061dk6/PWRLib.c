@@ -1,6 +1,6 @@
 /*! *********************************************************************************
 * Copyright (c) 2015, Freescale Semiconductor, Inc.
-* Copyright 2016-2017, 2019-2020, 2022 NXP
+* Copyright 2016-2017, 2019-2023 NXP
 * All rights reserved.
 *
 * \file
@@ -377,8 +377,8 @@ static uint32_t PWRLib_SetRamBanksRetention(void)
 {
     uint32_t bank_mask = 0;
 #if !defined FSL_RTOS_FREE_RTOS || (FSL_RTOS_FREE_RTOS == 0)
-    register uint32_t stack_bottom;
-    GET_MSP(stack_bottom);
+    register uint32_t current_stack_pointer;
+    GET_MSP(current_stack_pointer);
 #endif
 
 
@@ -411,7 +411,7 @@ static uint32_t PWRLib_SetRamBanksRetention(void)
      */
     if (heap_sz > 0)
     {
-    	bank_mask |= PWRLib_u32RamBanksSpanned(heapStartAddr, heap_sz);
+        bank_mask |= PWRLib_u32RamBanksSpanned(heapStartAddr, heap_sz);
     }
     /* SRAM0 bank 7 must be held in retention no matter how other data are mapped because the 32 bytes of
      * boot persistent data need to be preserved and it dwells at the top of bank7 @0x04015fe0.
@@ -438,24 +438,36 @@ static uint32_t PWRLib_SetRamBanksRetention(void)
 
     if (log_ring_sz!= 0)
     {
-    	bank_mask |= PWRLib_u32RamBanksSpanned(log_ring_addr, log_ring_sz);
+        bank_mask |= PWRLib_u32RamBanksSpanned(log_ring_addr, log_ring_sz);
     }
 #endif
 #if !defined FSL_RTOS_FREE_RTOS || (FSL_RTOS_FREE_RTOS == 0)
+#if gSupportBle
+    /* For BLE apps, the application places the stack astride top of Bank0 and bottom of Bank1 .
+     * If the stack has grown deeper than top of BANK0, we need to conserve this bank also.
+    */
     /* Need to keep the startup task's stack in retention down to current stack position */
     /* The most part of the retained mask has already been set at PWR_Init call but the stack
      * pointer might have gone past the bottom of the original bank */
-    if (stack_bottom < PWR_SRAM0_BANK1_START_ADDR)
+    if (current_stack_pointer < PWR_SRAM0_BANK1_START_ADDR)
     {
-    	bank_mask |= 0x001;
-    	/* Force bank 0 into retention in the unholy case where it is going too deep.
-    	 * The stack top placement should be tuned in a a way such that this never happens.
-    	 * Thence the assert in debug only.
-    	 * */
-    	assert(0);
+        bank_mask |= 0x001;
+        /* Force bank 0 into retention in the unholy case where it is going too deep.
+         * The stack top placement should be tuned in a a way such that this never happens.
+         * Thence the assert in debug only.
+         * */
+        assert(0);
+    }
+#else
+    /* linker scripts for Zigbee application place the data form the top downwards becasue the smaller 
+     * banks are at the top of SRAM0. Some ZB apps have a RAM footprint < 16kB. Since Bank7 must be
+    * retained anyway, using Bank0 would use 20kB. */
+    if (current_stack_pointer < PWR_SRAM0_BANK7_START_ADDR)
+    {
+        bank_mask |= PWRLib_u32RamBanksSpanned(current_stack_pointer, PWR_SRAM0_END-current_stack_pointer);
     }
 #endif
-
+#endif
     return bank_mask;
 }
 
@@ -472,7 +484,7 @@ void PWRLib_SetDeepSleepMode(uint8_t lpMode)
     if (lpMode == cPWR_DeepSleep_RamOffOsc32kOn ||
          lpMode == cPWR_PowerDown_RamRet ||
          lpMode == cPWR_DeepSleep_RamOffOsc32kOff ||
-		 lpMode == cPWR_DeepSleep_RamOffOsc32kOnTimersOff)
+         lpMode == cPWR_DeepSleep_RamOffOsc32kOnTimersOff)
         BLE_enable_sleep();
     else
         BLE_disable_sleep();
@@ -982,16 +994,16 @@ void PWRLib_EnterPowerDownModeRamOn(uint32_t mode)
          * the Idle Task Stack that is retained anyway.
          * Cancel retention of Bank0 and do limited copy to other retained region.
          * */
-    	PWR_vStackRetentionBank0(false);
+        PWR_vStackRetentionBank0(false);
         OSA_LowPowerCompressStackToRetainedLocation();
     }
     else
     {
         /* Force retention of Bank0 where stacks are located */
-    	PWR_vStackRetentionBank0(true);
+        PWR_vStackRetentionBank0(true);
 #ifdef PWR_StackCompressDBG
-    	*(uint32_t*)0x04000800 = 0x12345678;
-    	*(uint32_t*)0x04000804 = 0x9abcdef0;
+        *(uint32_t*)0x04000800 = 0x12345678;
+        *(uint32_t*)0x04000804 = 0x9abcdef0;
 #endif
 
         PWR_DBG_LOG("Stacks retained time=%d", time_to_next_expected_wakeup);

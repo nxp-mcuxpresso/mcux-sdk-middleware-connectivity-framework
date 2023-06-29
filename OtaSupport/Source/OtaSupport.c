@@ -115,6 +115,34 @@ static const efuse_AESKeyPresent_t efuse_AESKeyPresent = (efuse_AESKeyPresent_t)
 
 #define gOtaVerifyWriteBufferSize_d (16) /* [bytes] */
 
+#if defined(gOTAUseCustomOtaEntry) && (gOTAUseCustomOtaEntry == 1)
+#ifndef OTA_ENTRY_TOP_ADDR
+#if (gOTACustomOtaEntryMemory == OTACustomStorage_Ram)
+#if defined(__CC_ARM)
+extern uint32_t Image$$__top_RAM1$$Length[];
+#else /* defined(__CC_ARM) */
+extern uint32_t __top_RAM1[];
+#endif /* defined(__CC_ARM) */
+#define OTA_ENTRY_TOP_ADDR            (uint32_t)(__top_RAM1)   /* By default, set storage region at top of RAM2/RAM1 */
+#else /* (gOTACustomOtaEntryMemory == OTACustomStorage_ExtFlash) */
+#define OTA_ENTRY_TOP_ADDR            (gEepromParams_StartOffset_c + gEepromParams_TotalSize_c) /* By default, set storage region at top of flash */
+#endif /* gOTACustomOtaEntryMemory */
+#endif /* OTA_ENTRY_TOP_ADDR */
+
+/* When in external flash, the OTA entry must be aligned with the top of a sector */
+#if (gOTACustomOtaEntryMemory == OTACustomStorage_ExtFlash)
+#if ((OTA_ENTRY_TOP_ADDR % gEepromParams_SectorSize_c) != 0)
+#error "OTA_ENTRY_TOP_ADDR must be a multiple of the sector size"
+#endif
+#endif
+
+#endif /* gOTAUseCustomOtaEntry */
+
+#if defined(gMemManagerLight) && (gMemManagerLight != 0)
+#define MEM_BufferAllocWithIdWrap(size, id) MEM_BufferAllocWithId(size, id)
+#else
+#define MEM_BufferAllocWithIdWrap(size, id) MEM_BufferAllocWithId(size, id, (void*)__get_LR())
+#endif /* gMemManagerLight */
 
 /******************************************************************************
 *******************************************************************************
@@ -188,6 +216,9 @@ typedef struct {
     bool_t gOtaInvalidateHeader;
 #endif
     bool_t isInitialized;
+#if defined(gOTAAllowCustomStartAddress) && (gOTAAllowCustomStartAddress == 1)
+    uint32_t startEepromOffset;
+#endif
 } OtaFlashTaskContext_t;
 
 /******************************************************************************
@@ -200,7 +231,7 @@ static bool_t OtaSupportCallback(clientPacket_t* pData);
 #endif
 
 #if defined(gOTA_externalFlash_d) && (gOTA_externalFlash_d == 1)
-static otaResult_t OTA_ExtFlashImageCheck(uint32_t img_length);
+static otaResult_t OTA_ExtFlashImageCheck(uint32_t start_addr, uint32_t img_length);
 #endif
 
 static uint32_t OTA_GetMaxAllowedArchSize(void);
@@ -212,7 +243,11 @@ static otaResult_t OTA_CheckVerifyFlash(uint8_t * pData, uint32_t flash_addr, ui
 
 #ifdef CPU_JN518X
 #if gEepromType_d != gEepromDevice_InternalFlash_c || defined(SOTA_ENABLED)
+#if defined (gOTAUseCustomOtaEntry) && (gOTAUseCustomOtaEntry == 1)
+static bool_t OTA_AddNewOTAEntry(uint32_t imgAddr, uint8_t flag, bool commit);
+#else
 static bool_t OTA_SetNewPsectorOTAEntry(uint32_t imgAddr, uint8_t flag);
+#endif /* gOTAUseCustomOtaEntry */
 #endif
 
 #if gBootData_None_c && (gEepromType_d == gEepromDevice_InternalFlash_c)
@@ -221,6 +256,11 @@ static uint32_t OTA_GetInternalStorageAddress(void);
 
 #endif
 static otaResult_t OTA_WriteToFlash(uint16_t NoOfBytes, uint32_t Addr, uint8_t *outbuf);
+
+#if defined(gOTACustomOtaEntryMemory) && (gOTACustomOtaEntryMemory == OTACustomStorage_Ram)
+static uint8_t OTA_WriteDataMemCpy(uint16_t NoOfBytes, uint32_t Addr, uint8_t *inbuf);
+#endif
+static uint8_t OTA_ReadDataMemCpy(uint16_t NoOfBytes, uint32_t Addr, uint8_t *inbuf);
 
 #if gOtaEepromPostedOperations_d
 #if (gOtaErasePolicy_c == gOtaEraseAtImageStart_c)
@@ -271,8 +311,20 @@ static OtaFlashTaskContext_t mHandle = {
         .gOtaInvalidateHeader = FALSE,
 #endif
         .isInitialized = FALSE,
+#if defined(gOTAAllowCustomStartAddress) && (gOTAAllowCustomStartAddress == 1)
+        .startEepromOffset = 0,
+#endif
 };
 
+#if defined(gOTAUseCustomOtaEntry) && (gOTAUseCustomOtaEntry == 1)
+static CustomOtaEntries_t custom_ota_entries = {
+        .entries = {{0}},
+        .custom_data = {0},
+        .ota_state = otaNoImage,
+        .number_of_entry = 0,
+        .custom_data_length = 0,
+};
+#endif
 
 #ifndef CPU_JN518X
 
@@ -395,9 +447,13 @@ otaResult_t OTA_StartImageWithMaxSize(uint32_t length, uint32_t maxAllowedArchSi
             RAISE_ERROR(status, gOtaInvalidOperation_c);
         /* Check if the internal FLASH or the EEPROM have enough room to store
            the image */
+        uint32_t eepromAddressOffset = gBootData_Image_Offset_c;
+#if defined(gOTAAllowCustomStartAddress) && (gOTAAllowCustomStartAddress == 1)
+        eepromAddressOffset += mHandle.startEepromOffset;
+#endif
         if((length > maxAllowedArchSize)
 #if defined(gOTA_externalFlash_d) && (gOTA_externalFlash_d == 1)
-             || (length > (gEepromParams_TotalSize_c - gBootData_Image_Offset_c))
+             || (length > (gEepromParams_TotalSize_c - eepromAddressOffset))
 #else
              || (length > gFlashParams_MaxImageLength_c)
 #endif
@@ -406,7 +462,7 @@ otaResult_t OTA_StartImageWithMaxSize(uint32_t length, uint32_t maxAllowedArchSi
 
 #if defined(gOTA_externalFlash_d) && (gOTA_externalFlash_d == 1)
         /* Check if the ota image fits within the image directory provisioned into PSECT */
-        otaResult_t check_status = OTA_ExtFlashImageCheck(length);
+        otaResult_t check_status = OTA_ExtFlashImageCheck(eepromAddressOffset, length);
         if (gOtaSuccess_c != check_status)
             RAISE_ERROR(status, check_status);
 #endif
@@ -415,10 +471,10 @@ otaResult_t OTA_StartImageWithMaxSize(uint32_t length, uint32_t maxAllowedArchSi
         /* Init the length of the OTA image currently written */
         mHandle.OtaImageCurrentLength = 0;
         /* Init the current EEPROM write address */
-        mHandle.CurrentEepromAddress = gBootData_Image_Offset_c;
+        mHandle.CurrentEepromAddress = eepromAddressOffset;
 #if gOtaEepromPostedOperations_d
         mHandle.OtaImageLengthWritten = 0;
-        mHandle.EepromAddressWritten = gBootData_Image_Offset_c;
+        mHandle.EepromAddressWritten = eepromAddressOffset;
 #endif
         /* Mark that we have started loading an OTA image in EEPROM */
         mHandle.LoadOtaImageInEepromInProgress = TRUE;
@@ -443,8 +499,6 @@ otaResult_t OTA_StartImageWithMaxSize(uint32_t length, uint32_t maxAllowedArchSi
     } while (0);
     return status;
 }
-
-
 
 #if gOtaEepromPostedOperations_d
 
@@ -476,7 +530,7 @@ int OTA_TransactionResume(void)
 
             /* Use MSG_GetHead so as to leave Msg in queue so that op_type or sz can be transformed when operation completes
             * (in particular for block erasure) */
-            FLASH_TransactionOp_t * pMsg = MSG_GetHead(&mHandle.op_queue);
+            FLASH_TransactionOp_t * pMsg = (FLASH_TransactionOp_t *)MSG_GetHead(&mHandle.op_queue);
 
             switch (pMsg->op_type) {
             case FLASH_OP_WRITE:
@@ -599,7 +653,7 @@ int OTA_TransactionQueuePurge(void)
     int nb_purged = 0;
     while ( OTA_IsTransactionPending())
     {
-        FLASH_TransactionOp_t * pMsg = MSG_GetHead(&mHandle.op_queue);
+        FLASH_TransactionOp_t * pMsg = (FLASH_TransactionOp_t *)MSG_GetHead(&mHandle.op_queue);
         if (pMsg == NULL) break;
         OTA_DEBUG_TRACE("%s - trashing Addr=%x NoOfBytes=%d\r\n", __FUNCTION__,  pMsg->flash_addr , pMsg->sz);
 
@@ -854,9 +908,7 @@ otaResult_t OTA_PushImageChunk(uint8_t* pData, uint16_t length, uint32_t* pImage
             else
             {
                 OTA_DBG_LOG("NbOfBytes=%d Addr=%x", NoOfBytes, Addr);
-                pMsg = MEM_BufferAllocWithId(sizeof(FLASH_TransactionOp_t),
-                                             gOtaMemPoolId_c,
-                                             (void*)__get_LR());
+                pMsg = MEM_BufferAllocWithIdWrap(sizeof(FLASH_TransactionOp_t), gOtaMemPoolId_c);
                 OTA_DBG_LOG("pMsg addr = %x mHandle addr = %x\n", pMsg, &mHandle);
                 if (pMsg == NULL)
                 {
@@ -1002,7 +1054,159 @@ otaResult_t OTA_CommitImage(uint8_t* pBitmap)
     return status;
 }
 
+#if defined (gOTAUseCustomOtaEntry) && (gOTAUseCustomOtaEntry == 1)
+otaResult_t OTA_AddCustomOTAData(uint8_t *pCustomData, uint16_t customDataSize)
+{
+    otaResult_t result = gOtaInvalidParam_c;
+    if(custom_ota_entries.custom_data_length + customDataSize < OTAMaxCustomDataWords*sizeof(uint32_t))
+    {
+        FLib_MemCpy((uint32_t *)(&custom_ota_entries.custom_data[0] + custom_ota_entries.custom_data_length), pCustomData, customDataSize);
+        custom_ota_entries.custom_data_length += customDataSize;
+        result = gOtaSuccess_c;
+    }
+    return result;
+}
 
+bool OTA_CommitCustomEntries(void)
+{
+    extern void ResetMCU(void);
+    bool entrySet = FALSE;
+    uint32_t storage_addr = OTA_ENTRY_TOP_ADDR;
+    custom_ota_entries.ota_state = otaNewImage;
+#if (gOTACustomOtaEntryMemory == OTACustomStorage_Ram)
+    otaUtilsResult_t result = OtaUtils_StoreCustomOtaEntry(&custom_ota_entries, (OtaUtils_EEPROM_ReadData) OTA_WriteDataMemCpy, storage_addr);
+#else /* OTACustomStorage_ExtFlash */
+    EEPROM_EraseBlock((storage_addr - 1)& ~ (gEepromParams_SectorSize_c - 1), gEepromParams_SectorSize_c);
+    otaUtilsResult_t result = OtaUtils_StoreCustomOtaEntry(&custom_ota_entries, (OtaUtils_EEPROM_ReadData) OTA_WriteToFlash, storage_addr);
+#if (gOTACustomOtaEntryMemory == OTACustomStorage_ExtFlash)
+    storage_addr += FSL_FEATURE_SPIFI_START_ADDR;
+#endif
+#endif
+
+    if(result == gOtaUtilsSuccess_c)
+    {
+        image_directory_entry_t custom_entry = {
+             .img_base_addr = storage_addr,
+             .img_nb_pages = 0,
+             .flags = OTA_CUSTOM_ENTRY_FLAG,
+             .img_type = 0,
+        };
+        if (psector_SetOtaEntry(&custom_entry, true) == 0)
+        {
+            entrySet = TRUE;
+        }
+    }
+    return(entrySet);
+}
+
+void OTA_ResetCustomEntries(void)
+{
+    memset(&custom_ota_entries.custom_data[0], 0, OTAMaxCustomDataWords*sizeof(uint32_t));
+    memset(&custom_ota_entries.entries[0], 0, sizeof(image_directory_entry_t)*OTAMaxCustomEntryNumber);
+    custom_ota_entries.custom_data_length = 0;
+    custom_ota_entries.number_of_entry = 0;
+    custom_ota_entries.ota_state = otaNoImage;
+
+    uint32_t storage_addr = OTA_ENTRY_TOP_ADDR;
+#if (gOTACustomOtaEntryMemory == OTACustomStorage_Ram)
+    OtaUtils_StoreCustomOtaEntry(&custom_ota_entries, (OtaUtils_EEPROM_ReadData) OTA_WriteDataMemCpy, storage_addr);
+#else /* OTACustomStorage_ExtFlash */
+    EEPROM_EraseBlock((storage_addr - 1)& ~ (gEepromParams_SectorSize_c - 1), gEepromParams_SectorSize_c);
+    OtaUtils_StoreCustomOtaEntry(&custom_ota_entries, (OtaUtils_EEPROM_ReadData) OTA_WriteToFlash, storage_addr);
+#endif
+}
+
+otaResult_t OTA_GetCustomEntries(CustomOtaEntries_t *pEntries)
+{
+    uint16_t lenghtBytes;
+    uint32_t storage_addr = OTA_ENTRY_TOP_ADDR;
+    otaResult_t result = gOtaInvalidParam_c;
+    do{
+        if(pEntries == NULL)
+            break ;
+
+#if (gOTACustomOtaEntryMemory == OTACustomStorage_Ram)
+        if(gOtaUtilsSuccess_c != OtaUtils_GetCustomOtaEntry(pEntries , &lenghtBytes, OTA_ReadDataMemCpy, storage_addr))
+            break;
+#else /* OTACustomStorage_ExtFlash */
+        if(gOtaUtilsSuccess_c != OtaUtils_GetCustomOtaEntry(pEntries , &lenghtBytes, (OtaUtils_EEPROM_ReadData)EEPROM_ReadData, storage_addr))
+            break;
+#endif
+        result = gOtaSuccess_c;
+    } while (0);
+    return(result);
+}
+
+void OTA_AddNewImageFlag(void)
+{
+    OTA_DEBUG_TRACE("%s\r\n", __FUNCTION__);
+    OTA_DBG_LOG("");
+#if (gEepromType_d != gEepromDevice_None_c) && (!gEnableOTAServer_d || (gEnableOTAServer_d && gUpgradeImageOnCurrentDevice_d))
+    /* OTA image successfully written into the non-volatile storage.
+       Set the boot flag to trigger the Bootloader at the next CPU Reset. */
+    bool val = TRUE;
+    do {
+        if(! mHandle.NewImageReady ) break;
+
+#if gBootData_None_c && defined CPU_JN518X
+  #if gEepromType_d != gEepromDevice_InternalFlash_c
+        uint8_t flags;
+        switch (mHandle.ciphered_mode) {
+        case eCipherKeyNone:
+            flags = OTA_BOOTABLE_IMAGE_FLAG; /* bootable bit - image in plain text */
+            break;
+        case eEfuseKey:
+            flags = (OTA_BOOTABLE_IMAGE_FLAG | OTA_AES_FUSED_CIPHERING_FLAG); /* bootable bit + AES ciphering with fused key */
+            break;
+        case eSoftwareKey:
+            flags = (OTA_BOOTABLE_IMAGE_FLAG | OTA_AES_SW_CIPHERING_FLAG); /* bootable bit + AES ciphering with SW key */
+            break;
+        default:
+            flags = 0;
+            break;
+        }
+        uint32_t imageStartAddress = FSL_FEATURE_SPIFI_START_ADDR+gBootData_Image_Offset_c;
+    #if defined(gOTAAllowCustomStartAddress) && (gOTAAllowCustomStartAddress == 1)
+        imageStartAddress += mHandle.startEepromOffset;
+    #endif
+        if(OTA_AddNewOTAEntry(imageStartAddress, flags, false))
+        {
+            val = FALSE;
+            break;
+        }
+
+  #endif /* gEepromType_d != gEepromDevice_InternalFlash_c */
+#else  /* gBootData_None_c && defined CPU_JN518X */
+        uint32_t status;
+        union{
+            uint32_t value;
+            uint8_t aValue[FSL_FEATURE_FLASH_PFLASH_BLOCK_WRITE_UNIT_SIZE];
+        }bootFlag;
+        NV_Init();
+
+        bootFlag.value = gBootValueForTRUE_c;
+
+        status = NV_FlashProgramUnaligned((uint32_t)&gBootFlags.newBootImageAvailable,
+                                          sizeof(bootFlag),
+                                          bootFlag.aValue);
+
+        if( (status != kStatus_FLASH_Success)
+            break;
+        if (!FLib_MemCmpToVal(gBootFlags.internalStorageAddr, 0xFF, sizeof(gBootFlags.internalStorageAddr)) ))
+            break;
+        bootFlag.value = gEepromParams_StartOffset_c + gBootData_ImageLength_Offset_c;
+        status = NV_FlashProgramUnaligned((uint32_t)&gBootFlags.internalStorageAddr,
+                                            sizeof(bootFlag),
+                                            bootFlag.aValue);
+        if( status != kStatus_FLASH_Success )
+            break;
+        val = FALSE;
+#endif  /* gBootData_None_c && defined CPU_JN518X */
+    } while (0);
+    mHandle.NewImageReady = val;
+#endif /* (gEepromType_d != gEepromDevice_None_c) && (!gEnableOTAServer_d || (gEnableOTAServer_d && gUpgradeImageOnCurrentDevice_d)) */
+}
+#endif /* gOTAUseCustomOtaEntry */
 /*! *********************************************************************************
 * \brief  Set the boot flags, to trigger the Bootloader at the next CPU reset.
 *
@@ -1023,7 +1227,7 @@ void OTA_SetNewImageFlag(void)
         uint32_t address = OTA_GetInternalStorageAddress();
 
     #ifdef SOTA_ENABLED
-        if (OTA_SetNewPsectorOTAEntry(address, BIT(0)))
+        if (OTA_SetNewPsectorOTAEntry(address, OTA_BOOTABLE_IMAGE_FLAG))
         {
             val = FALSE;
             break;
@@ -1040,19 +1244,27 @@ void OTA_SetNewImageFlag(void)
         uint8_t flags;
         switch (mHandle.ciphered_mode) {
         case eCipherKeyNone:
-            flags = BIT(0); /* bootable bit - image in plain text */
+            flags = OTA_BOOTABLE_IMAGE_FLAG; /* bootable bit - image in plain text */
             break;
         case eEfuseKey:
-            flags = (BIT(0) | BIT(7)); /* bootable bit + AES ciphering with fused key */
+            flags = (OTA_BOOTABLE_IMAGE_FLAG| OTA_AES_FUSED_CIPHERING_FLAG); /* bootable bit + AES ciphering with fused key */
             break;
         case eSoftwareKey:
-            flags = (BIT(0) | BIT(6)); /* bootable bit + AES ciphering with SW key */
+            flags = (OTA_BOOTABLE_IMAGE_FLAG | OTA_AES_SW_CIPHERING_FLAG); /* bootable bit + AES ciphering with SW key */
             break;
         default:
             flags = 0;
             break;
         }
-        if (OTA_SetNewPsectorOTAEntry(FSL_FEATURE_SPIFI_START_ADDR+gBootData_Image_Offset_c, flags))
+        uint32_t imageStartAddress = FSL_FEATURE_SPIFI_START_ADDR+gBootData_Image_Offset_c;
+#if defined(gOTAAllowCustomStartAddress) && (gOTAAllowCustomStartAddress == 1)
+        imageStartAddress += mHandle.startEepromOffset;
+#endif
+#if defined (gOTAUseCustomOtaEntry) && (gOTAUseCustomOtaEntry == 1)
+        if(OTA_AddNewOTAEntry(imageStartAddress, flags, true))
+#else
+        if (OTA_SetNewPsectorOTAEntry(imageStartAddress, flags))
+#endif /* gOTAUseCustomOtaEntry */
         {
             val = FALSE;
             break;
@@ -1095,6 +1307,13 @@ static uint8_t OTA_ReadDataMemCpy(uint16_t NoOfBytes, uint32_t Addr, uint8_t *in
   return 0;
 }
 
+#if defined(gOTACustomOtaEntryMemory) && (gOTACustomOtaEntryMemory == OTACustomStorage_Ram)
+static uint8_t OTA_WriteDataMemCpy(uint16_t NoOfBytes, uint32_t Addr, uint8_t *inbuf)
+{
+  FLib_MemCpy((void*)(Addr), inbuf, NoOfBytes);
+  return 0;
+}
+#endif
 
 /*! *********************************************************************************
 * \brief        Image validation + authenfication if a root certificate is found
@@ -1110,7 +1329,10 @@ otaImageAuthResult_t OTA_ImageAuthenticate()
     uint16_t authLevelVal = 0;
     otaImageAuthResult_t result = gOtaImageAuthFail_c;
     uint8_t *pParam = NULL;
-    uint32_t imgAddrOta = gEepromParams_StartOffset_c;
+    uint32_t imgAddrOta = gEepromParams_StartOffset_c + gBootData_Image_Offset_c;
+#if defined(gOTAAllowCustomStartAddress) && (gOTAAllowCustomStartAddress == 1)
+    imgAddrOta += mHandle.startEepromOffset;
+#endif
     OtaUtils_EEPROM_ReadData pFunctionEepromRead = (OtaUtils_EEPROM_ReadData) OTA_ReadDataMemCpy;
 #if gEepromType_d == gEepromDevice_InternalFlash_c
     bool_t imgIsRemappable = TRUE;
@@ -1201,8 +1423,56 @@ void OTA_ResetCurrentEepromAddress(void)
 {
 #if (gEepromType_d != gEepromDevice_None_c) && (!gEnableOTAServer_d || (gEnableOTAServer_d && gUpgradeImageOnCurrentDevice_d))
     mHandle.CurrentEepromAddress = gBootData_Image_Offset_c;
+#if defined(gOTAAllowCustomStartAddress) && (gOTAAllowCustomStartAddress == 1)
+    mHandle.CurrentEepromAddress += mHandle.startEepromOffset;
+#endif
 #endif
 }
+
+/*! *********************************************************************************
+* \brief  Returns the Current Eeprom Address
+*
+********************************************************************************** */
+uint32_t OTA_GetCurrentEepromAddressOffset(void)
+{
+    uint32_t addr = 0;
+#if (gEepromType_d != gEepromDevice_None_c) && (!gEnableOTAServer_d || (gEnableOTAServer_d && gUpgradeImageOnCurrentDevice_d))
+    addr = mHandle.CurrentEepromAddress - gBootData_Image_Offset_c;
+#endif
+    return addr;
+}
+
+/*! *********************************************************************************
+* \brief  Set the Additional Eeprom offset value - To be used before start image
+*
+********************************************************************************** */
+#if defined(gOTAAllowCustomStartAddress) && (gOTAAllowCustomStartAddress == 1)
+uint32_t OTA_SetStartEepromOffset(uint32_t address_offset)
+{
+    uint32_t aligned_offset_address = OTA_UTILS_IMAGE_INVALID_ADDR;
+#if (gEepromType_d != gEepromDevice_None_c) && (!gEnableOTAServer_d || (gEnableOTAServer_d && gUpgradeImageOnCurrentDevice_d))
+    do {
+        if (mHandle.LoadOtaImageInEepromInProgress)
+            break;
+
+        /* Align the given address to the next sector */
+        address_offset = ((address_offset + gEepromParams_SectorSize_c-1)/gEepromParams_SectorSize_c)*gEepromParams_SectorSize_c;
+
+        if(gBootData_Image_Offset_c + address_offset < mHandle.CurrentEepromAddress)
+            break;
+
+        if(gBootData_Image_Offset_c + address_offset >= gEepromParams_TotalSize_c)
+            break;
+
+        aligned_offset_address = address_offset;
+        mHandle.startEepromOffset = aligned_offset_address;
+        mHandle.CurrentEepromAddress = gBootData_Image_Offset_c + aligned_offset_address;
+
+    } while (0);
+#endif
+    return aligned_offset_address;
+}
+#endif
 
 /*! *********************************************************************************
 * \brief  Compute CRC over a data chunk.
@@ -1274,8 +1544,11 @@ otaResult_t OTA_ClientInit(void)
     #if gExternalFlashIsCiphered_d
         mHandle.ciphered_mode =  (efuse_AESKeyPresent()) ? eEfuseKey : eSoftwareKey;
     #else
-    mHandle.ciphered_mode =  eCipherKeyNone;
+        mHandle.ciphered_mode =  eCipherKeyNone;
     #endif
+#if defined(gOTAAllowCustomStartAddress) && (gOTAAllowCustomStartAddress == 1)
+        mHandle.startEepromOffset = 0;
+#endif
         res = OTA_InitExternalMemory();
         mHandle.isInitialized = TRUE;
     }
@@ -1380,9 +1653,7 @@ otaResult_t OTA_MakeHeadRoomForNextBlock(uint32_t size, ota_op_completion_cb_t c
             status = gOtaInvalidParam_c;
             break;
         }
-        pMsg = MEM_BufferAllocWithId(sizeof(FLASH_TransactionOp_t),
-                                            gOtaMemPoolId_c,
-                                           (void*)__get_LR());
+        pMsg = MEM_BufferAllocWithIdWrap(sizeof(FLASH_TransactionOp_t), gOtaMemPoolId_c);
         if (pMsg == NULL)
         {
             status = gOtaError_c;
@@ -1393,6 +1664,7 @@ otaResult_t OTA_MakeHeadRoomForNextBlock(uint32_t size, ota_op_completion_cb_t c
         pMsg->flash_addr = mHandle.CurrentEepromAddress;
         pMsg->sz = size;
         pMsg->op_type = FLASH_OP_ERASE_NEXT_BLOCK;
+
         *(uint32_t*)(&pMsg->buf[0]) = (uint32_t)cb;
         *(uint32_t*)(&pMsg->buf[4]) = param;
 
@@ -1511,8 +1783,23 @@ bool psector_GetPageContents(psector_page_data_t * page, psector_partition_id_t 
 }
 
 #if gEepromType_d != gEepromDevice_InternalFlash_c || defined(SOTA_ENABLED)
+#if defined (gOTAUseCustomOtaEntry) && (gOTAUseCustomOtaEntry == 1)
+static bool_t OTA_AddNewOTAEntry(uint32_t imgAddr, uint8_t flag, bool commit)
+{
+    bool_t entrySet = FALSE;
 
+    custom_ota_entries.entries[custom_ota_entries.number_of_entry].img_base_addr = imgAddr;
+    custom_ota_entries.entries[custom_ota_entries.number_of_entry].img_nb_pages = INT_FLASH_PAGES_NB(mHandle.OtaImageTotalLength);
+    custom_ota_entries.entries[custom_ota_entries.number_of_entry].flags = flag;
+    custom_ota_entries.number_of_entry ++;
+    if(commit)
+    {
+        entrySet = OTA_CommitCustomEntries();
+    }
 
+    return entrySet;
+}
+#else
 static bool_t OTA_SetNewPsectorOTAEntry(uint32_t imgAddr, uint8_t flag)
 {
     bool_t entrySet = FALSE;
@@ -1527,6 +1814,7 @@ static bool_t OTA_SetNewPsectorOTAEntry(uint32_t imgAddr, uint8_t flag)
     }
     return entrySet;
 }
+#endif /* gOTAUseCustomOtaEntry */
 #endif /* gEepromType_d != gEepromDevice_InternalFlash_c || defined(SOTA_ENABLED) */
 
 #if gExternalFlashIsCiphered_d
@@ -1655,23 +1943,22 @@ static otaResult_t OTA_ReadDecipher(uint16_t NoOfBytes, uint32_t Addr, uint8_t *
 *  If field is not provisioned in PSECT, allow OTA for backward compatibility.
 *
 *****************************************************************************/
-static otaResult_t OTA_ExtFlashImageCheck(uint32_t img_length)
+static otaResult_t OTA_ExtFlashImageCheck(uint32_t start_addr, uint32_t img_length)
 {
     otaResult_t res = gOtaSuccess_c;
     psector_page_data_t * mPage0Hdl = psector_GetPage0Handle();
     for (int i = 0; i < IMG_DIRECTORY_MAX_SIZE; i++)
     {
-        /*  */
         if(mPage0Hdl->page0_v3.img_directory[i].img_type == OTA_UTILS_PSECT_OTA_PARTITION_IMAGE_TYPE)
         {
-            if(img_length > FLASH_PAGE_SIZE * mPage0Hdl->page0_v3.img_directory[i].img_nb_pages)
-            {
-                res = gOtaImageTooLarge_c;
-                break;
-            }
-            if(mPage0Hdl->page0_v3.img_directory[i].img_base_addr != FSL_FEATURE_SPIFI_START_ADDR + gBootData_Image_Offset_c)
+            if(FSL_FEATURE_SPIFI_START_ADDR + start_addr < mPage0Hdl->page0_v3.img_directory[i].img_base_addr)
             {
                 res = gOtaInvalidParam_c;
+                break;
+            }
+            if((start_addr + img_length) > (mPage0Hdl->page0_v3.img_directory[i].img_base_addr + FLASH_PAGE_SIZE * mPage0Hdl->page0_v3.img_directory[i].img_nb_pages))
+            {
+                res = gOtaImageTooLarge_c;
                 break;
             }
         }
@@ -1762,6 +2049,11 @@ static void OTA_ProgressDisplay(uint32_t current_length)
 
         prev_percentage = percentage;
     }
+    else
+    {
+        /* In case new OTA started without reset the device */
+        prev_percentage = percentage;
+    }
     if (current_length == mHandle.OtaImageTotalLength)
         PRINTF("\r\n");
 #endif
@@ -1848,9 +2140,7 @@ static int OTA_EraseStorageArea(uint32_t Addr, int32_t size)
     FLASH_TransactionOp_t * pMsg;
 
     do {
-        pMsg = MEM_BufferAllocWithId(sizeof(FLASH_TransactionOp_t),
-                                     gOtaMemPoolId_c,
-                                     (void*)__get_LR());
+        pMsg = MEM_BufferAllocWithIdWrap(sizeof(FLASH_TransactionOp_t), gOtaMemPoolId_c);
         if (pMsg == NULL)
         {
             status = gOtaError_c;

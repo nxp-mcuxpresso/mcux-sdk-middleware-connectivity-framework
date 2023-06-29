@@ -22,7 +22,7 @@
 #include "fsl_component_mem_manager_internal.h"
 #endif /* MEM_STATISTICS_INTERNAL MEM_MANAGER_BENCH*/
 #include "fsl_component_mem_manager.h"
-#if defined(gDebugConsoleEnable_d) && (gDebugConsoleEnable_d == 1)
+#if defined(gDebugConsoleEnable_d) && (gDebugConsoleEnable_d == 1) || defined(gMatterMemStatisticsEnabled)
 #include "fsl_debug_console.h"
 #endif
 
@@ -429,6 +429,32 @@ static void MEM_BlockHeaderSetGuards(blockHeader_t *BlockHdr)
 * Public functions
 *************************************************************************************
 ********************************************************************************** */
+
+#if gMatterMemStatisticsEnabled
+void PrintAllocFailedHeapStatistics()
+{
+    struct blockHeader_s * block;
+
+    MEM_DBG_LOG("\n--- MML statistics ---\n");
+    MEM_DBG_LOG("Free heap size:          %d\n", MEM_GetFreeHeapSize());
+    MEM_DBG_LOG("Min ever free heap size (NOT IMPLEMENTED): %d\n", 0);
+    MEM_DBG_LOG("Heap area start: 0x%p\n", heap_area_list.ctx.FreeBlockHdrList.head);
+    MEM_DBG_LOG("Heap area end:   0x%p\n", heap_area_list.ctx.FreeBlockHdrList.tail);
+
+    block = heap_area_list.ctx.FreeBlockHdrList.head;
+    while (block != heap_area_list.ctx.FreeBlockHdrList.tail)
+    {
+        MEM_DBG_LOG("Block: start: 0x%p", block);
+        MEM_DBG_LOG(", size: %5d", (uint8_t*)block->next - (uint8_t*)block);
+        MEM_DBG_LOG(", next free block: 0x%p", block->next_free);
+        MEM_DBG_LOG(", next block: 0x%p", block->next);
+        MEM_DBG_LOG(", used size between: %5d\n", (uint8_t*)block->next_free - ((uint8_t*)block->next));
+        block = block->next_free;
+    }
+
+    MEM_DBG_LOG("--- MML statistics ---\n");
+}
+#endif /* gMatterMemStatisticsEnabled */
 
 #if defined(MEM_STATISTICS_INTERNAL)
 static void MEM_Reports_memStatis(void)

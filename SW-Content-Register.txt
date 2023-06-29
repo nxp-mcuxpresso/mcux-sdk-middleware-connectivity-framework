@@ -1,21 +1,19 @@
-Release Name: MCUXpresso Software Development Kit (SDK) Framework Middleware
-Release Version: 2.6.10
-Package License: LA_OPT_NXP_Software_License.htm - Additional Distribution License, Section 2.3 applies  
+NXP Software Content Register
+Outgoing License: LA_OPT_NXP_SOFTWARE_License v44 - Additional distribution license granted, license in Section 2.3 applies
+License in File: LICENSE.htm
 
-FWK                        version: 5.7.8                           
-                           Location: /           
-                           Description: Connectivity Framework middleware for
-                           Connectivity stacks                               
-                           License: Open Source - BSD-3-Clause               
-                           Author: NXP                                       
-                           name: Connectivity Framework                      
-                           Format: source code and header Files              
+Package: mcux-sdk-middleware-connectivity-framework.git
+Version: 5.7.9
+Outgoing License: BSD-3-Clause
+License File: LICENSE.htm
+Description and comments: connectivity framework middleware
+Release Location: https://github.com/nxp-mcuxpresso/mcux-sdk-middleware-connectivity-framework.git
+Origin: NXP (BSD-3-clause)
 
-SecLib                     version: 5.7.8                              
-                           Location: SecLib/lib_crypto_*.a                                                 
-                           Description: Connectivity Security Library        
-                           License: Proprietary, See EULA                    
-                           LA_OPT_NXP_Software_License.htm                   
-                           Author: NXP                                       
-                           name: Connectivity SecLib                         
-                           Format: Binary libraries
+Package: seclib.a
+Version: 5.7.9
+Outgoing License: LA_OPT_NXP_SOFTWARE_License v44 - Additional distribution license granted, license in Section 2.3 applies
+License File: LICENSE.htm
+Description and comments: SecLib
+Release Location: https://github.com/nxp-mcuxpresso/mcux-sdk-middleware-connectivity-framework.git
+Origin: NXP (proprietary)
