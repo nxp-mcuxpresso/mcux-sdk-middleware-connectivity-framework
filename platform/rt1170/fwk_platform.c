@@ -1,5 +1,5 @@
 /* -------------------------------------------------------------------------- */
-/*                           Copyright 2022-2023 NXP                          */
+/*                             Copyright 2023 NXP                             */
 /*                            All rights reserved.                            */
 /*                    SPDX-License-Identifier: BSD-3-Clause                   */
 /* -------------------------------------------------------------------------- */
@@ -15,43 +15,12 @@
 /*                               Private memory                               */
 /* -------------------------------------------------------------------------- */
 
-static volatile int timer_manager_initialized = 0;
-
 // static TIME_STAMP_HANDLE_DEFINE(timestampHandle);
 // static bool timestampInitialized = false;
 
 /* -------------------------------------------------------------------------- */
 /*                              Public functions                              */
 /* -------------------------------------------------------------------------- */
-
-timer_status_t PLATFORM_InitTimerManager(void)
-{
-    /* Initialize timer manager */
-    timer_config_t timerConfig;
-    timer_status_t status;
-
-    if (timer_manager_initialized == 0)
-    {
-        timerConfig.instance    = PLATFORM_TM_INSTANCE;
-        timerConfig.srcClock_Hz = CLOCK_GetFreq(kCLOCK_OscClk);
-
-        status = TM_Init(&timerConfig);
-        if (status == kStatus_TimerSuccess)
-        {
-            timer_manager_initialized = 1;
-        }
-    }
-    return status;
-}
-
-void PLATFORM_DeinitTimerManager(void)
-{
-    if (timer_manager_initialized == 1)
-    {
-        TM_Deinit();
-        timer_manager_initialized = 0;
-    }
-}
 
 void PLATFORM_InitTimeStamp(void)
 {

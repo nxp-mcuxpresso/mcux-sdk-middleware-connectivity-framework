@@ -1,4 +1,5 @@
 set(SOURCES
+    fwk_platform.c
     fwk_platform_flash.c
 )
 
