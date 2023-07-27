@@ -31,11 +31,18 @@
 #endif
 #include "fsl_debug_console.h"
 
-/* Uncomment the following line to have the external flash put back to read mode after write/erase */
+/* Uncomment the following line to have the external flash put back to read mode after write/erase.
+ * This feature can be used for applications that require moving constant data/code
+ * to external flash in order to read/execute at runtime.
+ */
 //#define gSpifiReadModeDefault
 
 #if defined(gSpifiReadModeDefault) && (USE_RTOS == 1)
-/* For FreeRTOS apps which call EEPROM on idle task, enter/exit critical section is required */
+/* For FreeRTOS apps which write/erase the EEPROM on idle task and use gSpifiReadModeDefault, 
+ * enter/exit critical section is required. This ensures that the operation that changes the EEPROM 
+ * to command mode is finished on idle task before swiching to another task that requires read access
+ * to the external flash.
+ */
 #include "FreeRTOS.h"
 #include "task.h"
 #endif
@@ -358,6 +365,11 @@ ee_err_t EEPROM_DeInit(void)
     if (initialized)
     {
 #if defined(gSpifiReadModeDefault) && (USE_RTOS == 1)
+        /* For FreeRTOS apps which write/erase the EEPROM on idle task and use gSpifiReadModeDefault, 
+         * enter/exit critical section is required. This ensures that the operation that changes the EEPROM 
+         * to command mode is finished on idle task before swiching to another task that requires read access
+         * to the external flash.
+        */
         portENTER_CRITICAL();
 #else
         OSA_SemaphoreWait(mExtEepromSemaphoreId, osaWaitForever_c);
@@ -406,6 +418,11 @@ ee_err_t EEPROM_ChipErase(void)
     EEPROM_DBG_LOG("");
 
 #if defined(gSpifiReadModeDefault) && (USE_RTOS == 1)
+    /* For FreeRTOS apps which write/erase the EEPROM on idle task and use gSpifiReadModeDefault, 
+     * enter/exit critical section is required. This ensures that the operation that changes the EEPROM 
+     * to command mode is finished on idle task before swiching to another task that requires read access
+     * to the external flash.
+    */
     portENTER_CRITICAL();
 #else
     OSA_SemaphoreWait(mExtEepromSemaphoreId, osaWaitForever_c);
@@ -463,6 +480,11 @@ ee_err_t EEPROM_EraseBlock(uint32_t Addr, uint32_t block_size)
     EEPROM_DBG_LOG("");
 
 #if defined(gSpifiReadModeDefault) && (USE_RTOS == 1)
+    /* For FreeRTOS apps which write/erase the EEPROM on idle task and use gSpifiReadModeDefault, 
+     * enter/exit critical section is required. This ensures that the operation that changes the EEPROM 
+     * to command mode is finished on idle task before swiching to another task that requires read access
+     * to the external flash.
+    */
     portENTER_CRITICAL();
 #else
     OSA_SemaphoreWait(mExtEepromSemaphoreId, osaWaitForever_c);
@@ -564,6 +586,11 @@ ee_err_t EEPROM_EraseArea(uint32_t *Addr, int32_t *size, bool non_blocking)
         for (erase_addr = *Addr; remain_sz > 0; )
         {
 #if defined(gSpifiReadModeDefault) && (USE_RTOS == 1)
+            /* For FreeRTOS apps which write/erase the EEPROM on idle task and use gSpifiReadModeDefault, 
+             * enter/exit critical section is required. This ensures that the operation that changes the EEPROM 
+             * to command mode is finished on idle task before swiching to another task that requires read access
+             * to the external flash.
+            */
             portENTER_CRITICAL();
 #else
             OSA_SemaphoreWait(mExtEepromSemaphoreId, osaWaitForever_c);
@@ -858,13 +885,26 @@ uint8_t EEPROM_isBusy(void)
 {
     uint8_t res = 0;
 
-#if (!defined(gSpifiReadModeDefault) || (defined(gSpifiReadModeDefault) && (USE_RTOS == 0)))
+#if defined(gSpifiReadModeDefault) && (USE_RTOS == 1)
+    /* For FreeRTOS apps which write/erase the EEPROM on idle task and use gSpifiReadModeDefault, 
+     * enter/exit critical section is required. This ensures that the operation that changes the EEPROM 
+     * to command mode is finished on idle task before swiching to another task that requires read access
+     * to the external flash.
+    */
+    portENTER_CRITICAL();
+#else
     OSA_SemaphoreWait(mExtEepromSemaphoreId, osaWaitForever_c);
 #endif
 
     res = EEPROM_isBusyPrivate();
 
-#if (!defined(gSpifiReadModeDefault) || (defined(gSpifiReadModeDefault) && (USE_RTOS == 0)))
+#if defined(gSpifiReadModeDefault)
+    EEPROM_SetRead(0);
+#endif
+
+#if defined(gSpifiReadModeDefault) && (USE_RTOS == 1)
+    portEXIT_CRITICAL();
+#else
     OSA_SemaphorePost(mExtEepromSemaphoreId);
 #endif
 
@@ -1005,6 +1045,11 @@ void EepromWritePage(uint32_t NoOfBytes, uint32_t Addr, uint8_t *Outbuf)
 #endif /* gFlashBlockBitmap_d */
 
 #if defined(gSpifiReadModeDefault) && (USE_RTOS == 1)
+    /* For FreeRTOS apps which write/erase the EEPROM on idle task and use gSpifiReadModeDefault, 
+     * enter/exit critical section is required. This ensures that the operation that changes the EEPROM 
+     * to command mode is finished on idle task before swiching to another task that requires read access
+     * to the external flash.
+    */
     portENTER_CRITICAL();
 #else
     OSA_SemaphoreWait(mExtEepromSemaphoreId, osaWaitForever_c);

@@ -620,14 +620,14 @@ void OTA_WritePendingData(void)
     FLASH_TransactionOp_t * pMsg = mHandle.cur_transaction;
 
     do {
-        if (pMsg == NULL) break;
-        if (pMsg->sz == 0) break;
-        mHandle.cur_transaction = NULL;
-        /* Submit transaction */
-        OTA_MsgQueue(pMsg);
-        OTA_DEBUG_TRACE("%s - Addr=%x NoOfBytes=%d\r\n", __FUNCTION__,  pMsg->flash_addr , pMsg->sz);
-
-        OTA_DBG_LOG("Submitted page Addr=%x size=%d", pMsg->flash_addr, pMsg->sz);
+        if ((pMsg != NULL) && (pMsg->sz != 0))
+        {
+             mHandle.cur_transaction = NULL;
+            /* Submit transaction */
+            OTA_MsgQueue(pMsg);
+            OTA_DEBUG_TRACE("%s - Addr=%x NoOfBytes=%d\r\n", __FUNCTION__,  pMsg->flash_addr , pMsg->sz);
+            OTA_DBG_LOG("Submitted page Addr=%x size=%d", pMsg->flash_addr, pMsg->sz);
+        }
 
         while (EEPROM_isBusy());
         /* Always take head of queue : we just queued something so we know it is not empty */
@@ -639,7 +639,7 @@ void OTA_WritePendingData(void)
 
         while (EEPROM_isBusy());
 
-    } while (0);
+    } while (false);
 }
 /*****************************************************************************
 *  OTA_TransactionQueuePurge

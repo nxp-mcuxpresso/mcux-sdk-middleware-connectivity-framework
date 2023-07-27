@@ -3,7 +3,7 @@ Outgoing License: LA_OPT_NXP_SOFTWARE_License v44 - Additional distribution lice
 License in File: LICENSE.htm
 
 Package: mcux-sdk-middleware-connectivity-framework.git
-Version: 5.7.9
+Version: 5.7.10
 Outgoing License: BSD-3-Clause
 License File: LICENSE.htm
 Description and comments: connectivity framework middleware
@@ -11,7 +11,7 @@ Release Location: https://github.com/nxp-mcuxpresso/mcux-sdk-middleware-connecti
 Origin: NXP (BSD-3-clause)
 
 Package: seclib.a
-Version: 5.7.9
+Version: 5.7.10
 Outgoing License: LA_OPT_NXP_SOFTWARE_License v44 - Additional distribution license granted, license in Section 2.3 applies
 License File: LICENSE.htm
 Description and comments: SecLib
