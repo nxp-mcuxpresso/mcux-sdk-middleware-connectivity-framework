@@ -1,5 +1,5 @@
 /* -------------------------------------------------------------------------- */
-/*                           Copyright 2022-2023 NXP                          */
+/*                             Copyright 2023 NXP                             */
 /*                            All rights reserved.                            */
 /*                    SPDX-License-Identifier: BSD-3-Clause                   */
 /* -------------------------------------------------------------------------- */
@@ -9,16 +9,16 @@
 /* -------------------------------------------------------------------------- */
 
 #include "fwk_platform.h"
-// #include "fsl_adapter_time_stamp.h"
+#include "fsl_adapter_time_stamp.h"
+#include "fsl_clock.h"
 
 /* -------------------------------------------------------------------------- */
 /*                               Private memory                               */
 /* -------------------------------------------------------------------------- */
 
-static volatile int timer_manager_initialized = 0;
-
-// static TIME_STAMP_HANDLE_DEFINE(timestampHandle);
-// static bool timestampInitialized = false;
+static TIME_STAMP_HANDLE_DEFINE(timestampHandle);
+static volatile bool timerManagerInitialized = false;
+static volatile bool timestampInitialized    = false;
 
 /* -------------------------------------------------------------------------- */
 /*                              Public functions                              */
@@ -30,7 +30,7 @@ timer_status_t PLATFORM_InitTimerManager(void)
     timer_config_t timerConfig;
     timer_status_t status;
 
-    if (timer_manager_initialized == 0)
+    if (timerManagerInitialized == false)
     {
         timerConfig.instance    = PLATFORM_TM_INSTANCE;
         timerConfig.srcClock_Hz = CLOCK_GetFreq(kCLOCK_OscClk);
@@ -38,7 +38,7 @@ timer_status_t PLATFORM_InitTimerManager(void)
         status = TM_Init(&timerConfig);
         if (status == kStatus_TimerSuccess)
         {
-            timer_manager_initialized = 1;
+            timerManagerInitialized = true;
         }
     }
     return status;
@@ -46,43 +46,36 @@ timer_status_t PLATFORM_InitTimerManager(void)
 
 void PLATFORM_DeinitTimerManager(void)
 {
-    if (timer_manager_initialized == 1)
+    if (timerManagerInitialized == true)
     {
         TM_Deinit();
-        timer_manager_initialized = 0;
+        timerManagerInitialized = false;
     }
 }
 
 void PLATFORM_InitTimeStamp(void)
 {
-    // hal_time_stamp_config_t config;
+    hal_time_stamp_config_t config;
 
-    // if (timestampInitialized == false)
-    // {
-    //     CLOCK_AttachClk(kCLK32K_to_OSTIMER_CLK);
+    if (timestampInitialized == false)
+    {
+        config.instance    = 0U;
+        config.srcClock_Hz = CLOCK_GetPerClkFreq();
 
-    //     config.instance       = 0;
-    //     config.srcClock_Hz    = CLOCK_GetOSTimerClkFreq();
-    //     config.clockSrcSelect = 1;
+        HAL_TimeStampInit(timestampHandle, &config);
 
-    //     HAL_TimeStampInit(timestampHandle, &config);
-
-    //     timestampInitialized = true;
-    // }
+        timestampInitialized = true;
+    }
 }
 
 uint64_t PLATFORM_GetTimeStamp(void)
 {
-    // return HAL_GetTimeStamp(timestampHandle);
-    return 0U;
+    return HAL_GetTimeStamp(timestampHandle);
 }
 
 uint64_t PLATFORM_GetMaxTimeStamp(void)
 {
-    // /* The timestamp module always converts the timer counter to microsec
-    //  * as the OSTIMER is a 64bits timer, the conversion can overflow after a certain counter value
-    //  * So the timestamp module discards the 20 MSB to avoid this, so the max value of the counter is
-    //  * 0xFFFFFFFFFFFU */
-    // return (uint64_t)COUNT_TO_USEC(0xFFFFFFFFFFFU, CLOCK_GetOSTimerClkFreq());
-    return 0xFFFFFFFFU;
+    /* The timestamp module always converts the timer counter to microsec. As the GPT is a 32bits timer,
+     * and the calculations are 64 bit, no overflow is to be taken into account */
+    return (uint64_t)COUNT_TO_USEC(~0UL, CLOCK_GetPerClkFreq());
 }
