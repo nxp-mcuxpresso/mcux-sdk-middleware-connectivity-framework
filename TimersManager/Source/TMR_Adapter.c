@@ -1864,33 +1864,49 @@ void tickless_SystickCheckDrift(void)
 
 /* Calculate FRO32K frequency in 1/16 of Hertz to improve accuracy - shall not be modified */
 #define FREQ32K_CAL_SHIFT                 4
+#define FREQ32K_VAL                       32768
+#define FREQ32K_TOLERANCE                 (FREQ32K_VAL >> FREQ32K_CAL_SHIFT)
 
 static TMR_clock_32k_hk_t mHk32k = {
-    .freq32k          = 32768,
-    .freq32k_16thHz  = (32768 << FREQ32K_CAL_SHIFT), /* expressed in 16th of Hz: (1<<19) */
+    .freq32k          = FREQ32K_VAL,
+    .freq32k_16thHz  = (FREQ32K_VAL << FREQ32K_CAL_SHIFT), /* expressed in 16th of Hz: (1<<19) */
 };
 
 static void FRO32K_Update32kFrequency(uint32_t *freq)
 {
-    if ((freq != NULL) && (*freq != 0UL))
+    bool failed = false;
+
+    if ((freq != NULL) && (*freq != 0UL) && (*freq != 0xFFFFFFFF) )
     {
         uint64_t u64_ts;
         TMR_clock_32k_hk_t *hk = (TMR_clock_32k_hk_t *)TMR_Get32kHandle();
 
         uint32_t val = hk->freq32k_16thHz;
         val = ((val << FRO32K_CAL_AVERAGE) - val + *freq) >> FRO32K_CAL_AVERAGE ;
-        hk->freq32k_16thHz = val;
-        hk->freq32k = (val >> FREQ32K_CAL_SHIFT);
-        *freq = hk->freq32k;
 
-        /* update SW timestamp with new frequency estimation */
-        u64_ts = TMR_GetTimestampUs();
-        (void)u64_ts;
+        /* Check if value is within tolerance 1/16th of 32kHz */
+        if (((val >> FREQ32K_CAL_SHIFT) > (FREQ32K_VAL - FREQ32K_TOLERANCE)) && ((val >> FREQ32K_CAL_SHIFT) < (FREQ32K_VAL + FREQ32K_TOLERANCE)))
+        {
+            hk->freq32k_16thHz = val;
+            hk->freq32k = (val >> FREQ32K_CAL_SHIFT);
+            *freq = hk->freq32k;
+            /* update SW timestamp with new frequency estimation */
+            u64_ts = TMR_GetTimestampUs();
+            (void)u64_ts;
 
-        TMR_DBG_LOG("ts=%d freq32k=%d freq32k_16thHz=%d", (uint32_t)u64_ts, hk->freq32k, hk->freq32k_16thHz);
-
+            TMR_DBG_LOG("ts=%d freq32k=%d freq32k_16thHz=%d", (uint32_t)u64_ts, hk->freq32k, hk->freq32k_16thHz);
+        }
+        else
+        {
+            failed = true;
+        }
     }
     else
+    {
+        failed = true;
+    }
+
+    if (failed == true)
     {
         LpIoSet(4, 1);
         LpIoSet(4, 0);
@@ -1980,8 +1996,8 @@ void FRO32K_Init(void)
         else
         {
             /* Case of the Xtal32k */
-            mHk32k.freq32k_16thHz = 32768 << FREQ32K_CAL_SHIFT;
-            mHk32k.freq32k = 32768;
+            mHk32k.freq32k_16thHz = FREQ32K_VAL << FREQ32K_CAL_SHIFT;
+            mHk32k.freq32k = FREQ32K_VAL;
         }
     }
 #endif /* gClkRecalFro32K */

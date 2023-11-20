@@ -547,6 +547,8 @@ PUBLIC PDM_teStatus PDM_eGetDeviceWearCountProfile(uint32_t au32WearCount[], uin
 
 PUBLIC void PDM_vSetWearLevelDifference(uint32_t u32WearLevelDifference);
 
+PUBLIC uint32_t PDM_GetSegmentBufferSize(void);
+
 int PDM_Init(void);
 
 #if defined UART_DEBUG
