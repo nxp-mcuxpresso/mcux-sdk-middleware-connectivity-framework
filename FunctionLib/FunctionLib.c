@@ -1,16 +1,17 @@
 /*! *********************************************************************************
-* Copyright (c) 2015, Freescale Semiconductor, Inc.
-* Copyright 2016-2017 NXP
-* All rights reserved.
-*
-* \file
-*
-* This module contains various common functions like copy and compare routines.
-*
-* SPDX-License-Identifier: BSD-3-Clause
-********************************************************************************** */
-
+ * Copyright (c) 2015, Freescale Semiconductor, Inc.
+ * Copyright 2016-2017, 2019, 2022 NXP
+ * All rights reserved.
+ *
+ * \file
+ *
+ * This module contains various common functions like copy and compare routines.
+ *
+ * SPDX-License-Identifier: BSD-3-Clause
+ ********************************************************************************** */
+#include "EmbeddedTypes.h"
 #include "FunctionLib.h"
+#include <stddef.h>
 #include "fwk_hal_macros.h"
 
 #if gUseToolchainMemFunc_d
@@ -58,244 +59,264 @@
 ********************************************************************************** */
 
 /*! *********************************************************************************
-* \brief  This function copies bytes from one buffer to another.
-*         The buffers should not overlap.
-*
-* \param[in, out]  pDst Pointer to the destination buffer.
-*
-* \param[in]  pSrc Pointer to the source buffer.
-*
-* \param[in]  cBytes Number of bytes to copy.
-*
-* \post  The source and destination buffers must not overlap.
-*
-* \remarks
-*
-********************************************************************************** */
-void FLib_MemCpy (void* pDst,
-                  const void* pSrc,
-                  uint32_t cBytes)
+ * \brief  This function copies bytes from one buffer to another.
+ *         The buffers should not overlap.
+ *
+ * \param[in, out]  pDst Pointer to the destination buffer.
+ *
+ * \param[in]  pSrc Pointer to the source buffer.
+ *
+ * \param[in]  cBytes Number of bytes to copy.
+ *
+ * \post  The source and destination buffers must not overlap.
+ *
+ * \remarks
+ *
+ ********************************************************************************** */
+void FLib_MemCpy(void *pDst, const void *pSrc, uint32_t cBytes)
 {
 #if gFLib_CheckBufferOverflow_d && defined(MEM_TRACKING)
     (void)MEM_BufferCheck(pDst, cBytes);
 #endif
 
 #if gUseToolchainMemFunc_d
-    memcpy(pDst, pSrc, cBytes);
+    (void)memcpy(pDst, pSrc, cBytes);
 #else
-    while (cBytes)
+    while (cBytes != 0U)
     {
-        *((uint8_t*)pDst) = *((uint8_t*)pSrc);
-        pDst = ((uint8_t*)pDst)+1;
-        pSrc = ((uint8_t*)pSrc)+1;
+        *((uint8_t *)pDst) = *((const uint8_t *)pSrc);
+        pDst               = ((uint8_t *)pDst) + 1;
+        pSrc               = ((const uint8_t *)pSrc) + 1;
         cBytes--;
     }
 #endif
 }
 
 /*! *********************************************************************************
-* \brief  This function copies the specified number of bytes from the
-*         source address to the destination address.  No attempt is made
-*         to handle overlapping copies to prevent loss of data.
-*         The copying is optimized to avoid alignment problems, and attempts
-*         to copy 32bit numbers optimally.
-*
-* \param[in]  from_ptr Pointer to the source buffer.
-*
-* \param[in, out]  to_ptr Pointer to the destination buffer.
-*
-* \param[in]  number_of_bytes  Number of bytes to copy (32 bit value).
-*
-* \post
-*
-* \remarks
-*
-********************************************************************************** */
-void FLib_MemCpyAligned32bit (void* to_ptr,
-                              const void* from_ptr,
-                              register uint32_t number_of_bytes)
+ * \brief  This function copies the specified number of bytes from the
+ *         source address to the destination address.  No attempt is made
+ *         to handle overlapping copies to prevent loss of data.
+ *         The copying is optimized to avoid alignment problems, and attempts
+ *         to copy 32bit numbers optimally.
+ *
+ * \param[in]  from_ptr Pointer to the source buffer.
+ *
+ * \param[in, out]  to_ptr Pointer to the destination buffer.
+ *
+ * \param[in]  number_of_bytes  Number of bytes to copy (32 bit value).
+ *
+ * \post
+ *
+ * \remarks
+ *
+ ********************************************************************************** */
+void FLib_MemCpyAligned32bit(void *to_ptr, const void *from_ptr, register uint32_t number_of_bytes)
 {
-    uint8_t*    from8_ptr = (uint8_t*)from_ptr;
-    uint8_t*    to8_ptr = (uint8_t*)to_ptr;
-    uint16_t*   from16_ptr = (uint16_t*)from_ptr;
-    uint16_t*   to16_ptr = (uint16_t*)to_ptr;
-    register    uint32_t* from32_ptr = (uint32_t*)from_ptr;
-    register    uint32_t* to32_ptr = (uint32_t*)to_ptr;
+    const uint8_t * from8_ptr  = (const uint8_t *)from_ptr;
+    uint8_t *       to8_ptr    = (uint8_t *)to_ptr;
+    const uint16_t *from16_ptr = (const uint16_t *)from_ptr;
+    uint16_t *      to16_ptr   = (uint16_t *)to_ptr;
 
-    register    uint32_t loops;
+    register const uint32_t *from32_ptr = (const uint32_t *)from_ptr;
+
+    register uint32_t *to32_ptr = (uint32_t *)to_ptr;
+
+    register uint32_t loops;
 
 #if gFLib_CheckBufferOverflow_d && defined(MEM_TRACKING)
     (void)MEM_BufferCheck(to_ptr, number_of_bytes);
 #endif
 
-    if (number_of_bytes > 3)
+    if (number_of_bytes > 3U)
     {
         /* Try to align source on word */
-        if ((uint32_t)from_ptr & 1)
+        if (((uint32_t)(const uint32_t *)from_ptr & 1UL) != 0UL)
         {
-            from8_ptr = (uint8_t*)from_ptr;
-            to8_ptr = (uint8_t*)to_ptr;
+            from8_ptr = (const uint8_t *)from_ptr;
+            to8_ptr   = (uint8_t *)to_ptr;
 
             *to8_ptr++ = *from8_ptr++;
 
             from_ptr = from8_ptr;
-            to_ptr = to8_ptr;
+            to_ptr   = to8_ptr;
             --number_of_bytes;
         }
 
         /* Try to align source on longword */
-        if ((uint32_t)from_ptr & 2)
+        if (((uint32_t)(const uint32_t *)from_ptr & 2UL) != 0UL)
         {
-            from16_ptr = (uint16_t*)from_ptr;
-            to16_ptr = (uint16_t*)to_ptr;
+            from16_ptr = (const uint16_t *)from_ptr;
+            to16_ptr   = (uint16_t *)to_ptr;
 
             *to16_ptr++ = *from16_ptr++;
 
             from_ptr = from16_ptr;
-            to_ptr = to16_ptr;
-            number_of_bytes -= 2;
+            to_ptr   = to16_ptr;
+            number_of_bytes -= 2UL;
         }
 
-        from32_ptr = (uint32_t*)from_ptr;
-        to32_ptr = (uint32_t*)to_ptr;
+        from32_ptr = (const uint32_t *)from_ptr;
+        to32_ptr   = (uint32_t *)to_ptr;
 
-        for (loops = number_of_bytes >> 2; loops != 0; loops--)
+        for (loops = number_of_bytes >> 2UL; loops != 0UL; loops--)
         {
             *to32_ptr++ = *from32_ptr++;
         }
 
         from_ptr = from32_ptr;
-        to_ptr = to32_ptr;
+        to_ptr   = to32_ptr;
     }
 
     /* Copy all remaining bytes */
-    if (number_of_bytes & 2)
+    if ((number_of_bytes & 2UL) != 0UL)
     {
-        from16_ptr = (uint16_t*)from_ptr;
-        to16_ptr = (uint16_t*)to_ptr;
+        from16_ptr = (const uint16_t *)from_ptr;
+        to16_ptr   = (uint16_t *)to_ptr;
 
         *to16_ptr++ = *from16_ptr++;
 
         from_ptr = from16_ptr;
-        to_ptr = to16_ptr;
+        to_ptr   = to16_ptr;
     }
 
-    if (number_of_bytes & 1)
+    if ((number_of_bytes & 1UL) != 0UL)
     {
-        *(uint8_t*)to_ptr = *(uint8_t*)from_ptr;
+        *(uint8_t *)to_ptr = *(const uint8_t *)from_ptr;
     }
 }
 
-
 /*! *********************************************************************************
-* \brief  Copy bytes from one buffer to another. The buffers should not overlap.
-*         The function can copy in either direction. If 'dir' is TRUE, then the function
-*         works like FLib_MemCpy(). If FALSE, the function swaps the buffer pointers
-*         before copying.
-*
-* \param[in, out]  pBuf1 Pointer to the destination/source buffer.
-*
-* \param[in, out]  pBuf2 Pointer to the source/destination buffer.
-*
-* \param[in]  dir Direction to copy: pBuf2->pBuf1 if TRUE, pBuf1->pBuf2 if FALSE
-*
-* \param[in]  n Number of bytes to copy.
-*
-* \post  The source and destination buffers must not overlap.
-*
-* \remarks
-*
-********************************************************************************** */
-void FLib_MemCpyDir (void* pBuf1,
-                     void* pBuf2,
-                     bool_t dir,
-                     uint32_t n)
+ * \brief  Copy bytes from one buffer to another. The buffers should not overlap.
+ *         The function can copy in either direction. If 'dir' is TRUE, then the function
+ *         works like FLib_MemCpy(). If FALSE, the function swaps the buffer pointers
+ *         before copying.
+ *
+ * \param[in, out]  pBuf1 Pointer to the destination/source buffer.
+ *
+ * \param[in, out]  pBuf2 Pointer to the source/destination buffer.
+ *
+ * \param[in]  dir Direction to copy: pBuf2->pBuf1 if TRUE, pBuf1->pBuf2 if FALSE
+ *
+ * \param[in]  n Number of bytes to copy.
+ *
+ * \post  The source and destination buffers must not overlap.
+ *
+ * \remarks
+ *
+ ********************************************************************************** */
+void FLib_MemCpyDir(void *pBuf1, void *pBuf2, bool_t dir, uint32_t n)
 {
     if (dir)
     {
-        FLib_MemCpy (pBuf1, pBuf2, n);
+        FLib_MemCpy(pBuf1, pBuf2, n);
     }
     else
     {
-        FLib_MemCpy (pBuf2, pBuf1, n);
+        FLib_MemCpy(pBuf2, pBuf1, n);
     }
 }
 
-
 /*! *********************************************************************************
-* \brief  The byte at index i from the source buffer is copied to index ((n-1) - i)
-*         in the destination buffer (and vice versa).
-*
-* \param[in, out]  pDst Pointer to the destination buffer.
-*
-* \param[in]  pSrc Pointer to the source buffer.
-*
-* \param[in]  cBytes Number of bytes to copy.
-*
-* \post
-*
-* \remarks
-*
-********************************************************************************** */
-void FLib_MemCpyReverseOrder (void* pDst,
-                              const void* pSrc,
-                              uint32_t cBytes)
+ * \brief  The byte at index i from the source buffer is copied to index ((n-1) - i)
+ *         in the destination buffer (and vice versa).
+ *         If the length is a multiple of 4 and both destination and source pointers are aligned,
+ *         an optimized version is executed.
+ *
+ * \param[in, out]  pDst Pointer to the destination buffer.
+ *
+ * \param[in]  pSrc Pointer to the source buffer.
+ *
+ * \param[in]  cBytes Number of bytes to copy.
+ *
+ * \post
+ *
+ * \remarks
+ *
+ ********************************************************************************** */
+void FLib_MemCpyReverseOrder(void *pDst, const void *pSrc, uint32_t cBytes)
 {
 #if gFLib_CheckBufferOverflow_d && defined(MEM_TRACKING)
     (void)MEM_BufferCheck(pDst, cBytes);
 #endif
-    if(cBytes)
+    if (cBytes != 0UL)
     {
-        pDst = (uint8_t*)pDst + (uint32_t)(cBytes-1);
-        while (cBytes)
+        if ((cBytes % sizeof(uint32_t)) == 0u)
         {
-            *((uint8_t*)pDst) = *((uint8_t*)pSrc);
-            pDst = (uint8_t*)pDst-1;
-            pSrc = (uint8_t*)pSrc+1;
-            cBytes--;
+            uint32_t        tmp;
+            uint32_t        N_words = (cBytes >> 2u);
+            const uint32_t *s_st    = (const uint32_t *)pSrc;
+            const uint32_t *s_nd    = &s_st[N_words - 1U];
+            uint32_t *      d_st    = (uint32_t *)pDst;
+            uint32_t *      d_nd    = &d_st[N_words - 1U];
+
+            for (uint32_t i = N_words / 2u; i > 0u; i--)
+            {
+                tmp     = HAL_BSWAP32(*s_nd--);
+                *d_nd-- = HAL_BSWAP32(*s_st++);
+                *d_st++ = tmp;
+            }
+            if ((N_words & 1u) == 1u) /* nb of words is odd */
+            {
+                /* There is a remaining word to be reversed */
+                tmp     = HAL_BSWAP32(*s_nd--);
+                *d_st++ = tmp;
+            }
+        }
+        else
+        {
+            pDst = (uint8_t *)pDst + (uint32_t)(cBytes - 1UL);
+            while (cBytes != 0UL)
+            {
+                *((uint8_t *)pDst) = *((const uint8_t *)pSrc);
+                pDst               = (uint8_t *)pDst - 1U;
+                pSrc               = (const uint8_t *)pSrc + 1U;
+                cBytes--;
+            }
         }
     }
 }
 
-
 /*! *********************************************************************************
-* \brief  This function compares two buffers.
-*
-* \param[in]  pData1  First buffer to compare.
-*
-* \param[in]  pData2  Second buffer to compare.
-*
-* \param[in]  cBytes Number of bytes to compare.
-*
-* \return  This function return TRUE if the buffers are equal and FALSE otherwise.
-*
-* \post
-*
-* \remarks
-*
-********************************************************************************** */
-bool_t FLib_MemCmp (const void* pData1,    /* IN: First memory block to compare */
-                    const void* pData2,    /* IN: Second memory block to compare */
-                    uint32_t cBytes  /* IN: Number of bytes to compare. */
-                   )
+ * \brief  This function compares two buffers.
+ *
+ * \param[in]  pData1  First buffer to compare.
+ *
+ * \param[in]  pData2  Second buffer to compare.
+ *
+ * \param[in]  cBytes Number of bytes to compare.
+ *
+ * \return  This function return TRUE if the buffers are equal and FALSE otherwise.
+ *
+ * \post
+ *
+ * \remarks
+ *
+ ********************************************************************************** */
+bool_t FLib_MemCmp(const void *pData1, /* IN: First memory block to compare */
+                   const void *pData2, /* IN: Second memory block to compare */
+                   uint32_t    cBytes  /* IN: Number of bytes to compare. */
+)
 {
     bool_t status = TRUE;
 #if gUseToolchainMemFunc_d
-    if( memcmp(pData1, pData2, cBytes) )
+    /* MISRA 21.16 */
+    const uint32_t *pData1_tmp = (const uint32_t *)pData1;
+    const uint32_t *pData2_tmp = (const uint32_t *)pData2;
+    if (memcmp(pData1_tmp, pData2_tmp, cBytes) != 0)
     {
         status = FALSE;
     }
 #else
-    while (cBytes)
+    while (cBytes != 0UL)
     {
-        if ( *((uint8_t *)pData1) != *((uint8_t *)pData2))
+        if (*((const uint8_t *)pData1) != *((const uint8_t *)pData2))
         {
             status = FALSE;
             break;
         }
 
-        pData2 = (uint8_t* )pData2+1;
-        pData1 = (uint8_t* )pData1+1;
+        pData2 = (const uint8_t *)pData2 + 1U;
+        pData1 = (const uint8_t *)pData1 + 1U;
         cBytes--;
     }
 #endif
@@ -303,91 +324,106 @@ bool_t FLib_MemCmp (const void* pData1,    /* IN: First memory block to compare 
 }
 
 /*! *********************************************************************************
-* \brief  This function compares each octet of a given location to a value.
-*
-* \param [in]     pAddr      location to be compared
-*
-* \param [in]     val        reference value
-*
-* \param [in]     len        length of location to be compared
-*
-* \return  This function return TRUE if all octests match and FALSE otherwise.
-*
-* \post
-*
-* \remarks
-*
-********************************************************************************** */
-bool_t FLib_MemCmpToVal
-(
-    const void* pAddr,
-    uint8_t val,
-    uint32_t len
-)
+ * \brief  This function compares each octet of a given location to a value.
+ *
+ * \param [in]     pAddr      location to be compared
+ *
+ * \param [in]     val        reference value
+ *
+ * \param [in]     len        length of location to be compared
+ *
+ * \return  This function return TRUE if all octests match and FALSE otherwise.
+ *
+ * \post
+ *
+ * \remarks
+ *
+ ********************************************************************************** */
+bool_t FLib_MemCmpToVal(const void *pAddr, uint8_t val, uint32_t len)
 {
-    while(len)
+    bool_t ret = TRUE;
+    while (len != 0UL)
     {
         len--;
 
-        if(((uint8_t *)pAddr)[len] != val)
+        if (((const uint8_t *)pAddr)[len] != val)
         {
-            return FALSE;
+            /*once compare context isn't equal, return*/
+            ret = FALSE;
+            break;
         }
     }
 
-    return TRUE;
+    return ret;
 }
 
 /*! *********************************************************************************
-* \brief  This function resets all bytes in a specified buffer to a set value.
-*
-* \param[in,out]  pDst  Address of the buffer to set.
-*
-* \param[in]  value  Set value.
-*
-* \param[in]  cBytes Number of bytes to set in the buffer (maximum 255 bytes).
-*
-* \post
-*
-* \remarks
-*
-********************************************************************************** */
-void FLib_MemSet (void* pData,
-                  uint8_t value,
-                  uint32_t cBytes)
+ * \brief  This function resets all bytes in a specified buffer to a set value.
+ *
+ * \param[in,out]  pDst  Address of the buffer to set.
+ *
+ * \param[in]  value  Set value.
+ *
+ * \param[in]  cBytes Number of bytes to set in the buffer (maximum 255 bytes).
+ *
+ * \post
+ *
+ * \remarks
+ *
+ ********************************************************************************** */
+void FLib_MemSet(void *pData, uint8_t value, uint32_t cBytes)
 {
 #if gFLib_CheckBufferOverflow_d && defined(MEM_TRACKING)
     (void)MEM_BufferCheck(pData, cBytes);
 #endif
 #if gUseToolchainMemFunc_d
-    memset(pData, value, cBytes);
+    (void)memset(pData, (int)value, cBytes);
 #else
-    while (cBytes)
+    while (cBytes != 0UL)
     {
-        ((uint8_t* )pData)[--cBytes] = value;
+        ((uint8_t *)pData)[--cBytes] = value;
     }
 #endif
 }
 
+/*! *********************************************************************************
+ * \brief  This function sets all words in a specified buffer to a set value.
+ *
+ * \param[in,out]  pData  Address of the buffer to set.
+ *
+ * \param[in]  value  Set value.
+ *
+ * \param[in]  cWords Number of words to set in the buffer.
+ *
+ * \post
+ *
+ * \remarks
+ *
+ ********************************************************************************** */
+void FLib_MemSet32Aligned(void *pData, uint32_t value, uint32_t cWords)
+{
+    while (cWords != 0UL)
+    {
+        ((uint32_t *)pData)[--cWords] = value;
+    }
+}
 
 /*! *********************************************************************************
-* \brief  This function copies a buffer,
-*         possibly into the same overlapping memory as it is taken from
-*
-* \param[in, out]  pDst Pointer to the destination buffer.
-*
-* \param[in]  pSrc Pointer to the source buffer.
-*
-* \param[in]  cBytes Number of bytes to copy.
-*
-* \post
-*
-* \remarks
-*
-********************************************************************************** */
-void FLib_MemInPlaceCpy (void* pDst,
-                         void* pSrc,
-                         uint32_t cBytes)
+ * \brief  This function copies a buffer,
+ *         possibly into the same overlapping memory as it is taken from
+ *
+ * \param[in, out]  pDst Pointer to the destination buffer.
+ *
+ * \param[in]  pSrc Pointer to the source buffer.
+ *
+ * \param[in]  cBytes Number of bytes to copy.
+ *
+ * \post
+ *
+ * \remarks
+ *
+ ********************************************************************************** */
+void FLib_MemInPlaceCpy(void *pDst, void *pSrc, uint32_t cBytes)
 {
 #if gFLib_CheckBufferOverflow_d && defined(MEM_TRACKING)
     (void)MEM_BufferCheck(pDst, cBytes);
@@ -398,113 +434,55 @@ void FLib_MemInPlaceCpy (void* pDst,
         if (pDst < pSrc)
         {
             /* If dst is before src in memory copy forward */
-            while (cBytes)
+            while (cBytes != 0UL)
             {
-                *((uint8_t*)pDst) = *((uint8_t*)pSrc);
-                pDst = ((uint8_t*)pDst)+1;
-                pSrc = ((uint8_t*)pSrc)+1;
+                *((uint8_t *)pDst) = *((uint8_t *)pSrc);
+                pDst               = ((uint8_t *)pDst) + 1U;
+                pSrc               = ((uint8_t *)pSrc) + 1U;
                 cBytes--;
             }
         }
         else
         {
             /* If dst is after src in memory copy backward */
-            while(cBytes)
+            while (cBytes != 0UL)
             {
                 cBytes--;
-                ((uint8_t* )pDst)[cBytes] = ((uint8_t* )pSrc)[cBytes];
+                ((uint8_t *)pDst)[cBytes] = ((uint8_t *)pSrc)[cBytes];
             }
         }
     }
 }
 
 /*! *********************************************************************************
-* \brief  Copy bytes. The byte at index i from the buffer is copied to index
-*         ((n-1) - i) in the same buffer (and vice versa).
-*         Used for endianess conversion of octet strings.
-*
-* \param[out] pBuf    Pointer to destination memory block to be byte reversed.
-* \param[in]  cBytes  Number of bytes to copy
-*
-* \remarks
-*       If the size is a multiple of 4 bytes, the operation is done word by word.
-*       Assumes that pBuf is word aligned.
-********************************************************************************** */
-void FLib_ReverseByteOrderInPlace(void *buf, uint32_t cBytes)
+ * \brief This function copies a 16bit value to an unaligned a memory block.
+ *
+ * \param[in, out]  pDst Pointer to the destination memory block.
+ *
+ * \param[in]  val16 The value to be copied.
+ *
+ ********************************************************************************** */
+void FLib_MemCopy16Unaligned(void *pDst, uint16_t val16)
 {
-    int i;
-
-    if ((cBytes % sizeof(uint32_t)) == 0)
-    {
-        uint32_t tmpU32;
-        uint32_t N_words = cBytes >> 2;
-        uint32_t * p_st  = (uint32_t*)buf;
-        uint32_t * p_nd  = &p_st[N_words-1];
-        i = N_words / 2;
-        while (i > 0)
-        {
-            tmpU32 = HAL_BSWAP32(*p_nd);
-            *p_nd = HAL_BSWAP32(*p_st);
-            *p_st = tmpU32;
-             p_nd--;
-            p_st++;
-            i--;
-        }
-        if (N_words & 1)
-        {
-            tmpU32 = HAL_BSWAP32(*p_nd);
-            *p_st = tmpU32;
-        }
-    }
-    else
-    {
-        uint8_t tmpU8;
-        uint8_t *st = buf;
-        uint8_t *end = &st[cBytes - 1];
-        i = cBytes / 2;
-        while (i > 0)
-        {
-            tmpU8 = *end;
-            *end-- = *st;
-            *st++ = tmpU8;
-            i--;
-        }
-    }
-}
-
-
-/*! *********************************************************************************
-* \brief This function copies a 16bit value to an unaligned a memory block.
-*
-* \param[in, out]  pDst Pointer to the destination memory block.
-*
-* \param[in]  val16 The value to be copied.
-*
-********************************************************************************** */
-void FLib_MemCopy16Unaligned (void* pDst,
-                              uint16_t val16)
-{
-    uint8_t* pData = (uint8_t*)pDst;
+    uint8_t *pData = (uint8_t *)pDst;
 
     *pData++ = (uint8_t)(val16);
-    *pData =   (uint8_t)(val16 >> 8);
+    *pData   = (uint8_t)(val16 >> 8);
 
     return;
 }
 
-
 /*! *********************************************************************************
-* \brief This function copies a 32bit value to an unaligned a memory block.
-*
-* \param[in, out]  pDst Pointer to the destination memory block.
-*
-* \param[in]  val32 The value to be copied.
-*
-********************************************************************************** */
-void FLib_MemCopy32Unaligned (void* pDst,
-                              uint32_t val32)
+ * \brief This function copies a 32bit value to an unaligned a memory block.
+ *
+ * \param[in, out]  pDst Pointer to the destination memory block.
+ *
+ * \param[in]  val32 The value to be copied.
+ *
+ ********************************************************************************** */
+void FLib_MemCopy32Unaligned(void *pDst, uint32_t val32)
 {
-    uint8_t* pData = (uint8_t*)pDst;
+    uint8_t *pData = (uint8_t *)pDst;
 
     *pData++ = (uint8_t)(val32);
     *pData++ = (uint8_t)(val32 >> 8);
@@ -514,19 +492,17 @@ void FLib_MemCopy32Unaligned (void* pDst,
     return;
 }
 
-
 /*! *********************************************************************************
-* \brief This function copies a 64bit value to an unaligned a memory block.
-*
-* \param[in, out]  pDst Pointer to the destination memory block.
-*
-* \param[in]  val64 The value to be copied.
-*
-********************************************************************************** */
-void FLib_MemCopy64Unaligned (void* pDst,
-                              uint64_t val64)
+ * \brief This function copies a 64bit value to an unaligned a memory block.
+ *
+ * \param[in, out]  pDst Pointer to the destination memory block.
+ *
+ * \param[in]  val64 The value to be copied.
+ *
+ ********************************************************************************** */
+void FLib_MemCopy64Unaligned(void *pDst, uint64_t val64)
 {
-    uint8_t* pData = (uint8_t*)pDst;
+    uint8_t *pData = (uint8_t *)pDst;
 
     *pData++ = (uint8_t)(val64);
     *pData++ = (uint8_t)(val64 >> 8);
@@ -535,47 +511,44 @@ void FLib_MemCopy64Unaligned (void* pDst,
     *pData++ = (uint8_t)(val64 >> 32);
     *pData++ = (uint8_t)(val64 >> 40);
     *pData++ = (uint8_t)(val64 >> 48);
-    *pData = (uint8_t)(val64 >> 56);
+    *pData   = (uint8_t)(val64 >> 56);
 
     return;
 }
 
-
 /*! *********************************************************************************
-* \brief  This function adds an offset to a pointer.
-*
-* \param[in,out]  pPtr  Pointer to the pointer to add the offset to
-*
-* \param[in]  offset  Offset to add to the specified pointer.
-*
-* \post
-*
-* \remarks
-*
-********************************************************************************** */
-void FLib_AddOffsetToPointer (void** pPtr,
-                              uint32_t offset)
+ * \brief  This function adds an offset to a pointer.
+ *
+ * \param[in,out]  pPtr  Pointer to the pointer to add the offset to
+ *
+ * \param[in]  offset  Offset to add to the specified pointer.
+ *
+ * \post
+ *
+ * \remarks
+ *
+ ********************************************************************************** */
+void FLib_AddOffsetToPointer(void **pPtr, uint32_t offset)
 {
-    (*pPtr) = ((uint8_t* )*pPtr) + offset;
+    (*pPtr) = ((uint8_t *)*pPtr) + offset;
 }
 
-
 /*! *********************************************************************************
-* \brief  This function returns the length of a NULL terminated string.
-*
-* \param[in]  str  A NULL terminated string
-*
-* \return  the size of string in bytes
-*
-********************************************************************************** */
+ * \brief  This function returns the length of a NULL terminated string.
+ *
+ * \param[in]  str  A NULL terminated string
+ *
+ * \return  the size of string in bytes
+ *
+ ********************************************************************************** */
 uint32_t FLib_StrLen(const char *str)
 {
 #if gUseToolchainMemFunc_d
-     return strlen(str);
+    return strlen(str);
 #else
-    register uint32_t len=0;
+    register uint32_t len = 0;
 
-    while(*str != '\0')
+    while (*str != '\0')
     {
         str++;
         len++;
@@ -583,47 +556,58 @@ uint32_t FLib_StrLen(const char *str)
 
     return len;
 #endif
-
 }
 
-#ifdef CPU_JN518X
 /*! *********************************************************************************
-* \brief  This function copies bytes from FLASH to ram.
-*
-* \param[in, out]  pDst Pointer to the destination buffer.
-*
-* \param[in]  pSrc Pointer to the source buffer.
-*
-* \param[in]  cBytes Number of bytes to copy.
-*
-* \remarks
-*
-********************************************************************************** */
-bool_t FLib_CopyFromFlash(void* pDst,
-                        const void* pSrc,
-                        uint32_t cBytes)
+ * \brief  Copy bytes. The byte at index i from the buffer is copied to index
+ *         ((n-1) - i) in the same buffer (and vice versa).
+ *         Used for endianess conversion of octet strings.
+ *
+ * \param[out] pBuf    Pointer to destination memory block to be byte reversed.
+ * \param[in]  cBytes  Number of bytes to copy
+ *
+ * \remarks
+ *       If the size is a multiple of 4 bytes, the operation is done word by word.
+ *       Assumes that pBuf is word aligned.
+ ********************************************************************************** */
+void FLib_ReverseByteOrderInPlace(void *buf, uint32_t cBytes)
 {
-    bool_t raise_error = FALSE;
+    uint32_t i;
 
-    TRY
+    if ((cBytes % sizeof(uint32_t)) == 0u)
     {
-        FLib_MemCpy(pDst, pSrc, cBytes);
+        uint32_t  tmpU32;
+        uint32_t  N_words = (cBytes >> 2u);
+        uint32_t *p_st    = (uint32_t *)buf;
+        uint32_t *p_nd    = &p_st[N_words - 1u];
+        i                 = N_words / 2u;
+        while (i > 0u)
+        {
+            tmpU32 = HAL_BSWAP32(*p_nd);
+            *p_nd  = HAL_BSWAP32(*p_st);
+            *p_st  = tmpU32;
+            p_nd--;
+            p_st++;
+            i--;
+        }
+        if ((N_words & 1u) != 0u)
+        {
+            tmpU32 = HAL_BSWAP32(*p_nd);
+            *p_st  = tmpU32;
+        }
     }
-    CATCH (BUS_EXCEPTION)
+    else
     {
-        raise_error = TRUE;
+        uint8_t  tmpU8;
+        uint8_t *st    = buf;
+        uint8_t *l_end = &st[cBytes - 1u];
+        i              = cBytes / 2u;
+        while (i > 0u)
+        {
+            tmpU8    = *l_end;
+            *l_end-- = *st;
+            *st++    = tmpU8;
+            i--;
+        }
     }
-    YRT;
-
-    return raise_error;
 }
-#else
-bool_t FLib_CopyFromFlash(void* pDst,
-                          const void* pSrc,
-                          uint32_t cBytes)
-{
-    FLib_MemCpy(pDst, pSrc, cBytes);
-    return false;
-}
-
-#endif

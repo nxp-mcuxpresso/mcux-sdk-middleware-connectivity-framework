@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 NXP
+ * Copyright 2020 NXP
  * All rights reserved.
  *
  * SPDX-License-Identifier: BSD-3-Clause
@@ -88,4 +88,9 @@ size_t xPortGetMinimumEverFreeHeapSize(void)
 void vPortInitialiseBlocks(void)
 {
     /* This just exists to keep the linker quiet. */
+}
+
+void vPortGetHeapStats(HeapStats_t *pxHeapStats)
+{
+    (void)pxHeapStats;
 }

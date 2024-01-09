@@ -1,0 +1,8 @@
+    .boot_hdr : ALIGN(4)
+    {
+        . = 0x0;
+        __FLASH_BASE = .;
+        KEEP(*(.flash_conf))
+        . = 0xC00;
+    } > BOARD_FLASH
+
